@@ -1,0 +1,32 @@
+{% extends "core/email_base.html" %}
+
+{% block title %}Your verification is approved{% endblock %}
+
+{% block content %}
+<h2 style="margin:0 0 16px;font-size:20px;color:#047857;">You're verified &#10003;</h2>
+
+<p style="margin:0 0 12px;font-size:15px;line-height:1.6;color:#374151;">
+  Hi {{ user.full_name|default:user.email }},
+</p>
+<p style="margin:0 0 12px;font-size:15px;line-height:1.6;color:#374151;">
+  Good news: your identity verification has been approved. Your account is now <strong>Tier 2</strong>.
+</p>
+
+<h3 style="margin:20px 0 8px;font-size:16px;color:#111827;">You can now</h3>
+<ul style="margin:0 0 20px;padding-left:20px;font-size:15px;line-height:1.7;color:#374151;">
+  <li>Deposit funds via USDT</li>
+  <li>Open and manage trades</li>
+  <li>Request withdrawals</li>
+</ul>
+
+<p style="margin:0 0 24px;text-align:center;">
+  <a href="{{ FRONTEND_URL }}"
+     style="display:inline-block;background:#111827;color:#ffffff;text-decoration:none;padding:12px 28px;border-radius:6px;font-size:15px;font-weight:bold;">
+    Go to {{ BRAND_NAME }}
+  </a>
+</p>
+
+<p style="margin:0;font-size:13px;line-height:1.6;color:#6b7280;">
+  For your protection, your verified name, date of birth, nationality and sex can no longer be edited from your profile.
+</p>
+{% endblock %}

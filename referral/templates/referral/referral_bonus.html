@@ -1,0 +1,26 @@
+{% extends "core/email_base.html" %}
+{% block title %}You earned USD {{ bonus_amount }}{% endblock %}
+{% block content %}
+<h2 style="margin:0 0 16px;font-family:Arial,Helvetica,sans-serif;color:#111827;">You earned USD {{ bonus_amount }}, {{ first_name }}!</h2>
+<p style="margin:0 0 16px;font-family:Arial,Helvetica,sans-serif;font-size:15px;line-height:24px;color:#374151;">
+  <strong>{{ referred_name }}</strong> funded their account and completed their first trade, so your referral bonus
+  has been added to your {{ BRAND_NAME }} balance.
+</p>
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="margin:0 0 24px;border:1px solid #e5e7eb;border-radius:6px;">
+  <tr>
+    <td style="padding:12px 16px;font-family:Arial,Helvetica,sans-serif;font-size:14px;color:#6b7280;">Bonus credited</td>
+    <td align="right" style="padding:12px 16px;font-family:Arial,Helvetica,sans-serif;font-size:14px;color:#111827;font-weight:bold;">USD {{ bonus_amount }}</td>
+  </tr>
+  <tr>
+    <td style="padding:12px 16px;border-top:1px solid #e5e7eb;font-family:Arial,Helvetica,sans-serif;font-size:14px;color:#6b7280;">Total referral earnings</td>
+    <td align="right" style="padding:12px 16px;border-top:1px solid #e5e7eb;font-family:Arial,Helvetica,sans-serif;font-size:14px;color:#111827;font-weight:bold;">USD {{ total_earned }}</td>
+  </tr>
+</table>
+<p style="margin:0 0 24px;text-align:center;">
+  <a href="{{ dashboard_url }}" style="display:inline-block;padding:12px 28px;background:#2563eb;color:#ffffff;text-decoration:none;border-radius:6px;font-family:Arial,Helvetica,sans-serif;font-size:15px;font-weight:bold;">Open referral dashboard</a>
+</p>
+<p style="margin:0;font-family:Arial,Helvetica,sans-serif;font-size:12px;line-height:18px;color:#6b7280;">
+  Cryptocurrency and forex trading involve significant risk, including loss of capital. Profits are not guaranteed.
+  Withdrawals require completed identity verification.
+</p>
+{% endblock %}
