@@ -1,0 +1,25 @@
+{% extends "core/email_base.html" %}
+{% block title %}Your trade is open{% endblock %}
+{% block content %}
+<h2 style="margin:0 0 16px;font-size:22px;color:#111827;">Trade opened</h2>
+<p style="margin:0 0 16px;font-size:15px;color:#374151;">Hi {{ user_name }},</p>
+<p style="margin:0 0 16px;font-size:15px;color:#374151;">
+  Your <strong>{{ side }}</strong> trade on <strong>{{ pair }}</strong> is now open and your margin has been reserved.
+</p>
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="border-collapse:collapse;margin:0 0 20px;font-size:14px;color:#374151;">
+  <tr><td style="padding:8px 0;border-bottom:1px solid #e5e7eb;">Reference</td><td align="right" style="padding:8px 0;border-bottom:1px solid #e5e7eb;"><strong>{{ reference }}</strong></td></tr>
+  <tr><td style="padding:8px 0;border-bottom:1px solid #e5e7eb;">Pair</td><td align="right" style="padding:8px 0;border-bottom:1px solid #e5e7eb;">{{ pair }}</td></tr>
+  <tr><td style="padding:8px 0;border-bottom:1px solid #e5e7eb;">Side</td><td align="right" style="padding:8px 0;border-bottom:1px solid #e5e7eb;">{{ side }}</td></tr>
+  <tr><td style="padding:8px 0;border-bottom:1px solid #e5e7eb;">Amount (margin)</td><td align="right" style="padding:8px 0;border-bottom:1px solid #e5e7eb;">${{ amount }}</td></tr>
+  <tr><td style="padding:8px 0;border-bottom:1px solid #e5e7eb;">Leverage</td><td align="right" style="padding:8px 0;border-bottom:1px solid #e5e7eb;">{{ leverage }}x</td></tr>
+  {% if take_profit_pct %}<tr><td style="padding:8px 0;border-bottom:1px solid #e5e7eb;">Take profit</td><td align="right" style="padding:8px 0;border-bottom:1px solid #e5e7eb;">{{ take_profit_pct }}%</td></tr>{% endif %}
+  {% if stop_loss_pct %}<tr><td style="padding:8px 0;border-bottom:1px solid #e5e7eb;">Stop loss</td><td align="right" style="padding:8px 0;border-bottom:1px solid #e5e7eb;">{{ stop_loss_pct }}%</td></tr>{% endif %}
+  <tr><td style="padding:8px 0;border-bottom:1px solid #e5e7eb;">Duration</td><td align="right" style="padding:8px 0;border-bottom:1px solid #e5e7eb;">{{ duration_hours }} hours</td></tr>
+  <tr><td style="padding:8px 0;border-bottom:1px solid #e5e7eb;">Opened</td><td align="right" style="padding:8px 0;border-bottom:1px solid #e5e7eb;">{{ opened_at }}</td></tr>
+  <tr><td style="padding:8px 0;">Scheduled close</td><td align="right" style="padding:8px 0;">{{ scheduled_close_at }}</td></tr>
+</table>
+<p style="margin:0 0 20px;font-size:14px;color:#374151;">
+  The trade closes automatically at the scheduled time, or earlier if the market closes for the weekend.
+</p>
+<p style="margin:0;"><a href="{{ FRONTEND_URL }}" style="display:inline-block;background:#2563eb;color:#ffffff;text-decoration:none;padding:12px 22px;border-radius:6px;font-size:15px;">View my trades</a></p>
+{% endblock %}

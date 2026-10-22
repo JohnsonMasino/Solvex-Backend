@@ -1,0 +1,27 @@
+{% extends "core/email_base.html" %}
+
+{% block title %}Withdrawal could not be processed{% endblock %}
+
+{% block content %}
+<h2 style="margin:0 0 16px;font-size:20px;color:#b91c1c;">Withdrawal could not be processed</h2>
+
+<p style="margin:0 0 12px;font-size:15px;line-height:1.6;color:#374151;">Hi {{ user.full_name|default:user.email }},</p>
+<p style="margin:0 0 16px;font-size:15px;line-height:1.6;color:#374151;">
+  We were unable to process withdrawal <strong>{{ withdrawal.reference }}</strong>
+  (${{ withdrawal.usd_amount|floatformat:2 }}). Nothing was deducted, and the reserved
+  <strong>${{ withdrawal.usd_amount|floatformat:2 }}</strong> is available in your balance again.
+</p>
+
+<div style="margin:16px 0;padding:14px 16px;background:#fef2f2;border-left:4px solid #b91c1c;border-radius:4px;">
+  <p style="margin:0 0 4px;font-size:13px;font-weight:bold;color:#991b1b;">Reason</p>
+  <p style="margin:0;font-size:15px;line-height:1.6;color:#374151;">{{ reason }}</p>
+</div>
+
+<p style="margin:0 0 24px;font-size:14px;line-height:1.6;color:#374151;">
+  Please check your wallet address and network, then submit a new withdrawal request.
+</p>
+
+<p style="margin:0 0 8px;text-align:center;">
+  <a href="{{ FRONTEND_URL }}" style="display:inline-block;background:#111827;color:#ffffff;text-decoration:none;padding:12px 28px;border-radius:6px;font-size:15px;font-weight:bold;">Open {{ BRAND_NAME }}</a>
+</p>
+{% endblock %}

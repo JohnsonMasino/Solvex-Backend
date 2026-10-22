@@ -1,0 +1,8 @@
+{% extends "core/email_base.html" %}
+{% block title %}Welcome to {{ BRAND_NAME }}{% endblock %}
+{% block content %}
+<h2 style="margin:0 0 16px;color:#111827;">Welcome aboard, {{ user.full_name }}!</h2>
+<p>Your email has been verified and your {{ BRAND_NAME }} account is ready.</p>
+<p>You're currently on <strong>Tier 1</strong>: you can log in, view your profile and submit identity verification (KYC). Complete KYC to unlock <strong>Tier 2</strong> and start depositing, trading and withdrawing.</p>
+<p style="text-align:center;margin:28px 0;"><a href="{{ FRONTEND_URL }}" style="display:inline-block;background:#1a56db;color:#ffffff;text-decoration:none;padding:12px 28px;border-radius:6px;font-weight:bold;">Go to {{ BRAND_NAME }}</a></p>
+{% endblock %}

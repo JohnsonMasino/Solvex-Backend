@@ -1,0 +1,18 @@
+{% extends "core/email_base.html" %}
+{% block title %}Someone you referred just joined{% endblock %}
+{% block content %}
+<h2 style="margin:0 0 16px;font-family:Arial,Helvetica,sans-serif;color:#111827;">Good news, {{ first_name }}!</h2>
+<p style="margin:0 0 16px;font-family:Arial,Helvetica,sans-serif;font-size:15px;line-height:24px;color:#374151;">
+  <strong>{{ referred_name }}</strong> just joined {{ BRAND_NAME }} using your referral link and verified their email address.
+</p>
+<p style="margin:0 0 24px;font-family:Arial,Helvetica,sans-serif;font-size:15px;line-height:24px;color:#374151;">
+  You will receive your <strong>USD {{ bonus_amount }}</strong> referral bonus once they fund their account
+  and complete their first trade.
+</p>
+<p style="margin:0 0 24px;text-align:center;">
+  <a href="{{ dashboard_url }}" style="display:inline-block;padding:12px 28px;background:#2563eb;color:#ffffff;text-decoration:none;border-radius:6px;font-family:Arial,Helvetica,sans-serif;font-size:15px;font-weight:bold;">View my referrals</a>
+</p>
+<p style="margin:0;font-family:Arial,Helvetica,sans-serif;font-size:13px;line-height:20px;color:#6b7280;">
+  To protect privacy, we only show a shortened name for people you refer.
+</p>
+{% endblock %}

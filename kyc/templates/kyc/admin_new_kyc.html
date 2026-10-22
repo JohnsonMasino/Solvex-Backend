@@ -1,0 +1,33 @@
+{% extends "core/email_base.html" %}
+
+{% block title %}New KYC submission{% endblock %}
+
+{% block content %}
+<h2 style="margin:0 0 16px;font-size:20px;color:#111827;">New KYC submission awaiting review</h2>
+
+<table role="presentation" cellpadding="0" cellspacing="0" style="width:100%;margin:0 0 20px;font-size:15px;color:#374151;">
+  <tr>
+    <td style="padding:6px 0;width:140px;color:#6b7280;">User</td>
+    <td style="padding:6px 0;">{{ user_email }}</td>
+  </tr>
+  <tr>
+    <td style="padding:6px 0;color:#6b7280;">Submitted</td>
+    <td style="padding:6px 0;">{{ submission.created_at|date:"j M Y, H:i" }} UTC</td>
+  </tr>
+  <tr>
+    <td style="padding:6px 0;color:#6b7280;">Attempt</td>
+    <td style="padding:6px 0;">#{{ submission.attempt_number }}</td>
+  </tr>
+</table>
+
+<p style="margin:0 0 24px;text-align:center;">
+  <a href="{{ admin_url }}"
+     style="display:inline-block;background:#111827;color:#ffffff;text-decoration:none;padding:12px 28px;border-radius:6px;font-size:15px;font-weight:bold;">
+    Review in admin
+  </a>
+</p>
+
+<p style="margin:0;font-size:13px;line-height:1.6;color:#6b7280;">
+  Identity details are intentionally not included in this email. Open the admin page to review them.
+</p>
+{% endblock %}

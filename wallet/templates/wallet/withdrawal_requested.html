@@ -1,0 +1,24 @@
+{% extends "core/email_base.html" %}
+
+{% block title %}Withdrawal request received{% endblock %}
+
+{% block content %}
+<h2 style="margin:0 0 16px;font-size:20px;color:#111827;">Withdrawal request received</h2>
+
+<p style="margin:0 0 12px;font-size:15px;line-height:1.6;color:#374151;">Hi {{ user.full_name|default:user.email }},</p>
+<p style="margin:0 0 16px;font-size:15px;line-height:1.6;color:#374151;">
+  Your withdrawal <strong>{{ withdrawal.reference }}</strong> has been confirmed and queued for processing.
+  The amount is reserved and can't be traded while it is pending.
+</p>
+
+<table role="presentation" cellpadding="0" cellspacing="0" style="width:100%;margin:0 0 16px;font-size:15px;color:#374151;">
+  <tr><td style="padding:6px 0;color:#6b7280;width:160px;">Amount (USD)</td><td style="padding:6px 0;">${{ withdrawal.usd_amount|floatformat:2 }}</td></tr>
+  <tr><td style="padding:6px 0;color:#6b7280;">You receive</td><td style="padding:6px 0;"><strong>{{ withdrawal.usdt_amount|floatformat:"-6" }} USDT</strong></td></tr>
+  <tr><td style="padding:6px 0;color:#6b7280;">Network</td><td style="padding:6px 0;">{{ withdrawal.get_network_display }}</td></tr>
+  <tr><td style="padding:6px 0;color:#6b7280;">Address</td><td style="padding:6px 0;font-family:monospace;word-break:break-all;">{{ withdrawal.address }}</td></tr>
+</table>
+
+<p style="margin:0;font-size:13px;line-height:1.6;color:#6b7280;">
+  We'll email you again once the transfer has been sent. If this wasn't you, contact support immediately.
+</p>
+{% endblock %}

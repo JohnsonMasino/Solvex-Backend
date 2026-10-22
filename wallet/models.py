@@ -1,0 +1,209 @@
+import secrets
+import string
+
+from django.conf import settings
+from django.db import models
+from django.db.models import F, Q
+
+from core.models import TimeStampedModel, UUIDModel
+
+def _check(condition, name):
+    """CheckConstraint compatible with Django 5.0 (check=) and 5.1+/6.x (condition=)."""
+    try:
+        return models.CheckConstraint(condition=condition, name=name)
+    except TypeError:  # Django < 5.1
+        return models.CheckConstraint(check=condition, name=name)
+
+
+_REF_ALPHABET = string.ascii_uppercase + string.digits
+
+
+def generate_reference(prefix: str) -> str:
+    return prefix + "".join(secrets.choice(_REF_ALPHABET) for _ in range(8))
+
+
+# --------------------------------------------------------------------------- #
+# Choices
+# --------------------------------------------------------------------------- #
+class Network(models.TextChoices):
+    BEP20 = "bep20", "USDT (BEP20 – BNB Smart Chain)"
+    ERC20 = "erc20", "USDT (ERC20 – Ethereum)"
+    TRC20 = "trc20", "USDT (TRC20 – TRON)"
+
+
+class EntryType(models.TextChoices):
+    DEPOSIT = "deposit", "Deposit"
+    WITHDRAWAL_RESERVE = "withdrawal_reserve", "Withdrawal reserved"
+    WITHDRAWAL = "withdrawal", "Withdrawal"
+    WITHDRAWAL_RELEASE = "withdrawal_release", "Withdrawal released"
+    TRADE_LOCK = "trade_lock", "Trade margin locked"
+    TRADE_SETTLE = "trade_settle", "Trade settled"
+    REFERRAL_BONUS = "referral_bonus", "Referral bonus"
+    ADJUSTMENT = "adjustment", "Adjustment"
+
+
+class DepositStatus(models.TextChoices):
+    PENDING = "pending", "Pending"
+    COMPLETED = "completed", "Completed"
+    DECLINED = "declined", "Declined"
+    CANCELLED = "cancelled", "Cancelled"
+
+
+class WithdrawalStatus(models.TextChoices):
+    AWAITING_OTP = "awaiting_otp", "Awaiting OTP"
+    PENDING = "pending", "Pending"
+    COMPLETED = "completed", "Completed"
+    FAILED = "failed", "Failed"
+    EXPIRED = "expired", "Expired"
+    CANCELLED = "cancelled", "Cancelled"
+
+
+# --------------------------------------------------------------------------- #
+# Wallet
+# --------------------------------------------------------------------------- #
+class Wallet(UUIDModel, TimeStampedModel):
+    # CASCADE so a brand-new user can be deleted; users with ledger history are protected
+    # because WalletTransaction.wallet / .user are PROTECT.
+    user = models.OneToOneField(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="wallet")
+    balance = models.DecimalField(max_digits=18, decimal_places=2, default=0)
+    locked_balance = models.DecimalField(max_digits=18, decimal_places=2, default=0)
+    pending_withdrawal_balance = models.DecimalField(max_digits=18, decimal_places=2, default=0)
+
+    class Meta:
+        constraints = [
+            _check(Q(balance__gte=0), "wallet_balance_gte_0"),
+            _check(Q(locked_balance__gte=0), "wallet_locked_gte_0"),
+            _check(Q(pending_withdrawal_balance__gte=0), "wallet_pending_gte_0"),
+            _check(
+                Q(balance__gte=F("locked_balance") + F("pending_withdrawal_balance")),
+                "wallet_balance_covers_locked_and_pending",
+            ),
+        ]
+
+    def __str__(self):
+        return f"Wallet<{self.user_id}> {self.balance}"
+
+    @property
+    def available_balance(self):
+        return max(self.balance - self.locked_balance - self.pending_withdrawal_balance, 0)
+
+
+class WalletTransaction(UUIDModel, TimeStampedModel):
+    """Append-only ledger."""
+
+    wallet = models.ForeignKey(Wallet, on_delete=models.PROTECT, related_name="transactions")
+    user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.PROTECT, related_name="wallet_transactions")
+    entry_type = models.CharField(max_length=20, choices=EntryType.choices)
+    amount = models.DecimalField(max_digits=18, decimal_places=2)
+    balance_delta = models.DecimalField(max_digits=18, decimal_places=2, default=0)
+    locked_delta = models.DecimalField(max_digits=18, decimal_places=2, default=0)
+    pending_delta = models.DecimalField(max_digits=18, decimal_places=2, default=0)
+    balance_after = models.DecimalField(max_digits=18, decimal_places=2)
+    locked_after = models.DecimalField(max_digits=18, decimal_places=2)
+    pending_after = models.DecimalField(max_digits=18, decimal_places=2)
+    reference = models.CharField(max_length=80, blank=True)
+    description = models.CharField(max_length=255, blank=True)
+
+    class Meta:
+        ordering = ("-created_at",)
+        constraints = [
+            models.UniqueConstraint(
+                fields=["entry_type", "reference"],
+                condition=~Q(reference=""),
+                name="wallet_tx_unique_ref",
+            ),
+        ]
+        indexes = [models.Index(fields=["user", "-created_at"], name="wallet_tx_user_created_idx")]
+
+    def __str__(self):
+        return f"{self.entry_type} {self.amount} ({self.reference})"
+
+    def save(self, *args, **kwargs):
+        if not self._state.adding:
+            raise RuntimeError("Ledger entries are append-only and cannot be modified.")
+        super().save(*args, **kwargs)
+
+    def delete(self, *args, **kwargs):
+        raise RuntimeError("Ledger entries cannot be deleted.")
+
+
+# --------------------------------------------------------------------------- #
+# Deposit
+# --------------------------------------------------------------------------- #
+class Deposit(UUIDModel, TimeStampedModel):
+    Status = DepositStatus
+
+    user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.PROTECT, related_name="deposits")
+    reference = models.CharField(max_length=20, unique=True)
+    network = models.CharField(max_length=10, choices=Network.choices)
+    usdt_amount = models.DecimalField(max_digits=24, decimal_places=6)
+    rate = models.DecimalField(max_digits=18, decimal_places=6, help_text="USD per 1 USDT, frozen at creation.")
+    usd_amount = models.DecimalField(max_digits=18, decimal_places=2, help_text="Frozen: usdt_amount x rate.")
+    deposit_address = models.CharField(max_length=100, help_text="Company address shown to the user.")
+    tx_hash = models.CharField(max_length=100, blank=True, help_text="Optional user-supplied proof.")
+    status = models.CharField(max_length=10, choices=DepositStatus.choices, default=DepositStatus.PENDING, db_index=True)
+    decline_reason = models.TextField(blank=True)
+    admin_note = models.TextField(blank=True)
+    processed_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, null=True, blank=True, on_delete=models.SET_NULL, related_name="+"
+    )
+    processed_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        ordering = ("-created_at",)
+        constraints = [
+            # One live deposit per tx hash (race-safe backstop for the service-level check).
+            models.UniqueConstraint(
+                fields=["tx_hash"],
+                condition=~Q(tx_hash="") & Q(status__in=["pending", "completed"]),
+                name="wallet_deposit_unique_live_txhash",
+            ),
+        ]
+        indexes = [models.Index(fields=["user", "-created_at"], name="wallet_dep_user_created_idx")]
+
+    def __str__(self):
+        return f"{self.reference} {self.usd_amount} USD ({self.status})"
+
+
+# --------------------------------------------------------------------------- #
+# Withdrawal
+# --------------------------------------------------------------------------- #
+class Withdrawal(UUIDModel, TimeStampedModel):
+    Status = WithdrawalStatus
+
+    user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.PROTECT, related_name="withdrawals")
+    reference = models.CharField(max_length=20, unique=True)
+    network = models.CharField(max_length=10, choices=Network.choices)
+    address = models.CharField(max_length=100)
+    usd_amount = models.DecimalField(max_digits=18, decimal_places=2)
+    rate = models.DecimalField(max_digits=18, decimal_places=6)
+    usdt_amount = models.DecimalField(max_digits=24, decimal_places=6, help_text="Exact USDT the admin must send.")
+    status = models.CharField(
+        max_length=15, choices=WithdrawalStatus.choices, default=WithdrawalStatus.AWAITING_OTP, db_index=True
+    )
+
+    otp_hash = models.CharField(max_length=64, blank=True)
+    otp_expires_at = models.DateTimeField(null=True, blank=True)
+    otp_attempts = models.PositiveSmallIntegerField(default=0)
+    otp_last_sent_at = models.DateTimeField(null=True, blank=True)
+    otp_resend_count = models.PositiveSmallIntegerField(default=0)
+
+    expires_at = models.DateTimeField()
+    confirmed_at = models.DateTimeField(null=True, blank=True)
+    admin_tx_hash = models.CharField(max_length=100, blank=True)
+    failure_reason = models.TextField(blank=True)
+    admin_note = models.TextField(blank=True)
+    processed_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, null=True, blank=True, on_delete=models.SET_NULL, related_name="+"
+    )
+    processed_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        ordering = ("-created_at",)
+        indexes = [
+            models.Index(fields=["user", "-created_at"], name="wallet_wd_user_created_idx"),
+            models.Index(fields=["status", "expires_at"], name="wallet_wd_status_expires_idx"),
+        ]
+
+    def __str__(self):
+        return f"{self.reference} {self.usd_amount} USD ({self.status})"
