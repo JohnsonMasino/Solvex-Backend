@@ -1,6 +1,6 @@
 # SolvexMarketInc — Trading Platform Backend
 
-This is the backend API for the SolvexMarketInc trading platform. It is built with Django and is intended to power the [SolvexMarketInc frontend](https://github.com/JohnsonMasino/Solvex-Frontend) by providing authentication, account management, identity verification, wallet records, and trading-related data for cryptocurrency and forex markets.
+This is the backend APIs for the SolvexMarketInc trading platform. It is built with Django and is intended to power the [SolvexMarketInc frontend](https://github.com/JohnsonMasino/Solvex-Frontend) by providing authentication, account management, identity verification, wallet records, and trading-related data for cryptocurrency and forex markets.
 
 > **Risk Disclaimer:** Cryptocurrency and forex trading involve significant financial risk, including the potential loss of invested capital. Profits are not guaranteed. Users should understand the risks before participating in trading activities.
 
