@@ -17,6 +17,7 @@ DEBUG = config("DEBUG", default=False, cast=bool)
 ALLOWED_HOSTS = config("ALLOWED_HOSTS", default="localhost,127.0.0.1", cast=Csv())
 CORS_ALLOWED_ORIGINS = config("CORS_ALLOWED_ORIGINS", default="http://localhost:5173", cast=Csv())
 CSRF_TRUSTED_ORIGINS = config("CSRF_TRUSTED_ORIGINS", default="", cast=Csv())
+CORS_EXPOSE_HEADERS = ["Retry-After"]
 
 AUTH_USER_MODEL = "authentication.User"  # MUST be set before the first migrate
 
@@ -157,7 +158,7 @@ ADMIN_NOTIFICATION_EMAIL = config("ADMIN_NOTIFICATION_EMAIL", default="")
 
 # --------------------------------------------------------------------------- cron / frontend
 CRON_SECRET_KEY = config("CRON_SECRET_KEY", default="")      # empty => cron endpoints refuse everything
-FRONTEND_URL = config("FRONTEND_URL", default="http://localhost:3000")
+FRONTEND_URL = config("FRONTEND_URL", default="http://localhost:5173").split(",")[0].strip().rstrip("/")
 FRONTEND_SIGNUP_PATH = config("FRONTEND_SIGNUP_PATH", default="/signup")
 FRONTEND_RESET_PASSWORD_PATH = config("FRONTEND_RESET_PASSWORD_PATH", default="/reset-password")
 
@@ -210,12 +211,12 @@ LOGGING = {
 
 # ─── JAZZMIN ──────────────────────────────────────────────
 JAZZMIN_SETTINGS = {
-    "site_title":        "Sinevest Admin",
-    "site_header":       "Sinevest",
-    "site_brand":        "Sinevest",
-    "welcome_sign":      "Welcome to Sinevest Control Panel",
-    "copyright":         "Sinevest Inc.",
-    "search_model":      ["accounts.User"],
+    "site_title": "SolvexMarketInc Admin",
+    "site_header": "SolvexMarketInc",
+    "site_brand": "SolvexMarketInc",
+    "welcome_sign": "Welcome to the SolvexMarketInc Control Panel",
+    "copyright": "SolvexMarketInc",
+    "search_model": ["authentication.User"],
     "topmenu_links": [
         {"name": "Home",  "url": "admin:index", "permissions": ["auth.view_user"]},
         {"name": "Site",  "url": "/", "new_window": True},
