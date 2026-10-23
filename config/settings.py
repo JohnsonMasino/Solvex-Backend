@@ -5,6 +5,7 @@ All configuration comes from environment variables via python-decouple.
 from datetime import timedelta
 from decimal import Decimal
 from pathlib import Path
+import os
 
 import dj_database_url
 from decouple import Csv, config
@@ -191,6 +192,10 @@ PROFILE_LOCK_IDENTITY_AFTER_KYC = config("PROFILE_LOCK_IDENTITY_AFTER_KYC", defa
 
 WALLET_MAX_PENDING_DEPOSITS = config("WALLET_MAX_PENDING_DEPOSITS", default=5, cast=int)
 WALLET_MAX_OTP_RESENDS = config("WALLET_MAX_OTP_RESENDS", default=3, cast=int)
+
+KYC_MIN_AGE = int(os.environ.get("KYC_MIN_AGE", 18))
+KYC_MAX_ATTEMPTS = int(os.environ.get("KYC_MAX_ATTEMPTS", 5))
+KYC_POLICY_VERSION = os.environ.get("KYC_POLICY_VERSION", "1.0")
 
 
 # --------------------------------------------------------------------------- production hardening
