@@ -1,12 +1,18 @@
 from django.contrib import admin
 from django.urls import include, path
 from drf_spectacular.views import SpectacularAPIView, SpectacularRedocView, SpectacularSwaggerView
+from django.http import JsonResponse
 
 # JSON 404/500 for URLs that never reach DRF (active when DEBUG=False)
 handler404 = "core.views.json_404"
 handler500 = "core.views.json_500"
 
+def root(request):
+    return JsonResponse({"status": "ok", "service": "solvex-backend"})
+
+
 urlpatterns = [
+    path("", root, name="root"),
     path("admin/", admin.site.urls),
     path("api/", include("core.urls")),                    # health
     path("api/auth/", include("authentication.urls")),
