@@ -3,6 +3,8 @@ authentication/services.py
 All business logic for the authentication app. Views stay thin.
 Nothing here is consumed by other apps (they only use the User model).
 """
+
+import hmac
 import logging
 import math
 import secrets
@@ -138,7 +140,7 @@ def verify_otp(email: str, otp: str) -> User:
             outcome = "otp_expired"
         elif record.attempts >= max_attempts:
             outcome = "otp_attempts_exceeded"
-        elif not verify_hash(_otp_digest(user, otp), record.code_hash):
+        elif not hmac.compare_digest(_otp_digest(user, otp), record.code_hash):
             record.attempts += 1
             record.save(update_fields=["attempts", "updated_at"])
             if record.attempts >= max_attempts:
