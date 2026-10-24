@@ -1,0 +1,28 @@
+{% extends "core/email_base.html" %}
+
+{% block title %}Loan payment received{% endblock %}
+
+{% block content %}
+<h2 style="margin:0 0 16px;font-size:20px;color:#111827;">Payment received on your loan</h2>
+
+<p style="margin:0 0 12px;font-size:15px;line-height:1.6;color:#374151;">Hi {{ user.full_name|default:user.email }},</p>
+<p style="margin:0 0 16px;font-size:15px;line-height:1.6;color:#374151;">
+  {% if automatic %}Following your deposit, we{% else %}We{% endif %} applied
+  <strong>${{ paid_amount|floatformat:2 }}</strong> to loan <strong>{{ loan.reference }}</strong>.
+</p>
+
+<table role="presentation" cellpadding="0" cellspacing="0" style="width:100%;margin:0 0 20px;font-size:15px;color:#374151;">
+  <tr><td style="padding:6px 0;color:#6b7280;width:180px;">Original loan</td><td style="padding:6px 0;">${{ principal|floatformat:2 }}</td></tr>
+  <tr><td style="padding:6px 0;color:#6b7280;">Paid in total</td><td style="padding:6px 0;">${{ amount_repaid|floatformat:2 }}</td></tr>
+  <tr><td style="padding:6px 0;color:#6b7280;">Amount still owed</td><td style="padding:6px 0;"><strong>${{ outstanding|floatformat:2 }}</strong></td></tr>
+  <tr><td style="padding:6px 0;color:#6b7280;">Due date</td><td style="padding:6px 0;">{{ due_at|date:"j M Y, H:i" }} UTC</td></tr>
+</table>
+
+<p style="margin:0 0 16px;font-size:13px;line-height:1.6;color:#6b7280;">
+  Interest keeps accruing on the original loan amount until the loan is fully repaid, so the sooner you pay, the less you owe.
+</p>
+
+<p style="margin:0 0 24px;text-align:center;">
+  <a href="{{ loan_url }}" style="display:inline-block;background:#111827;color:#ffffff;text-decoration:none;padding:12px 28px;border-radius:6px;font-size:15px;font-weight:bold;">View my loan</a>
+</p>
+{% endblock %}

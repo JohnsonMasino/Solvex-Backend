@@ -29,6 +29,35 @@ class Network(models.TextChoices):
     BEP20 = "bep20", "USDT (BEP20 – BNB Smart Chain)"
     ERC20 = "erc20", "USDT (ERC20 – Ethereum)"
     TRC20 = "trc20", "USDT (TRC20 – TRON)"
+    BTC = "btc", "BTC (Bitcoin)"
+    ETH = "eth", "ETH (Ethereum)"
+
+
+class Asset(models.TextChoices):
+    USDT = "usdt", "USDT"
+    BTC = "btc", "BTC"
+    ETH = "eth", "ETH"
+
+
+# Each network carries exactly one asset.
+NETWORK_ASSET = {
+    Network.BEP20: Asset.USDT,
+    Network.ERC20: Asset.USDT,
+    Network.TRC20: Asset.USDT,
+    Network.BTC: Asset.BTC,
+    Network.ETH: Asset.ETH,
+}
+
+# Max decimal places we accept / store per asset.
+ASSET_DECIMALS = {Asset.USDT: 6, Asset.BTC: 8, Asset.ETH: 8}
+
+# Withdrawals are still paid out in USDT only.
+USDT_NETWORKS = (Network.BEP20, Network.ERC20, Network.TRC20)
+WITHDRAWAL_NETWORK_CHOICES = [(n.value, n.label) for n in USDT_NETWORKS]
+
+
+def asset_for_network(network) -> "Asset":
+    return NETWORK_ASSET[Network(network)]
 
 
 class EntryType(models.TextChoices):
@@ -40,6 +69,8 @@ class EntryType(models.TextChoices):
     TRADE_SETTLE = "trade_settle", "Trade settled"
     REFERRAL_BONUS = "referral_bonus", "Referral bonus"
     ADJUSTMENT = "adjustment", "Adjustment"
+    LOAN_DISBURSEMENT = "loan_disbursement", "Loan disbursed"
+    LOAN_REPAYMENT = "loan_repayment", "Loan repayment"
 
 
 class DepositStatus(models.TextChoices):
@@ -136,9 +167,13 @@ class Deposit(UUIDModel, TimeStampedModel):
     user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.PROTECT, related_name="deposits")
     reference = models.CharField(max_length=20, unique=True)
     network = models.CharField(max_length=10, choices=Network.choices)
-    usdt_amount = models.DecimalField(max_digits=24, decimal_places=6)
-    rate = models.DecimalField(max_digits=18, decimal_places=6, help_text="USD per 1 USDT, frozen at creation.")
-    usd_amount = models.DecimalField(max_digits=18, decimal_places=2, help_text="Frozen: usdt_amount x rate.")
+    asset = models.CharField(max_length=10, choices=Asset.choices, default=Asset.USDT)
+    amount = models.DecimalField(
+        max_digits=24, decimal_places=8,
+        help_text="Amount in the asset's own units (USDT / BTC / ETH).",
+    )
+    rate = models.DecimalField(max_digits=18, decimal_places=6, help_text="USD per 1 unit of the asset, frozen at creation.")
+    usd_amount = models.DecimalField(max_digits=18, decimal_places=2, help_text="Frozen: amount x rate.")
     deposit_address = models.CharField(max_length=100, help_text="Company address shown to the user.")
     tx_hash = models.CharField(max_length=100, blank=True, help_text="Optional user-supplied proof.")
     status = models.CharField(max_length=10, choices=DepositStatus.choices, default=DepositStatus.PENDING, db_index=True)
@@ -162,20 +197,40 @@ class Deposit(UUIDModel, TimeStampedModel):
         indexes = [models.Index(fields=["user", "-created_at"], name="wallet_dep_user_created_idx")]
 
     def __str__(self):
-        return f"{self.reference} {self.usd_amount} USD ({self.status})"
+        return f"{self.reference} {self.amount} {str(self.asset).upper()} = {self.usd_amount} USD ({self.status})"
+
+    @property
+    def usdt_amount(self):
+        """Deprecated alias kept so old email templates / code that read `deposit.usdt_amount`
+        don't crash. Prefer `amount` + `asset`."""
+        return self.amount
 
 
 # --------------------------------------------------------------------------- #
 # Withdrawal
 # --------------------------------------------------------------------------- #
 class Withdrawal(UUIDModel, TimeStampedModel):
+    """
+    Money model (all frozen at creation):
+
+        usd_amount   USD value the user RECEIVES (paid out in USDT)
+        fee_percent  fee rate applied (e.g. 1.50)
+        fee_usd      usd_amount x fee_percent / 100, rounded to cents
+        total_usd    usd_amount + fee_usd  -> the amount reserved, then removed from the user's balance
+        rate         live USD per 1 USDT at creation
+        usdt_amount  usd_amount / rate     -> exact USDT the admin must send
+    """
+
     Status = WithdrawalStatus
 
     user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.PROTECT, related_name="withdrawals")
     reference = models.CharField(max_length=20, unique=True)
-    network = models.CharField(max_length=10, choices=Network.choices)
+    network = models.CharField(max_length=10, choices=WITHDRAWAL_NETWORK_CHOICES)
     address = models.CharField(max_length=100)
     usd_amount = models.DecimalField(max_digits=18, decimal_places=2)
+    fee_percent = models.DecimalField(max_digits=5, decimal_places=2, default=0)
+    fee_usd = models.DecimalField(max_digits=18, decimal_places=2, default=0)
+    total_usd = models.DecimalField(max_digits=18, decimal_places=2, default=0)
     rate = models.DecimalField(max_digits=18, decimal_places=6)
     usdt_amount = models.DecimalField(max_digits=24, decimal_places=6, help_text="Exact USDT the admin must send.")
     status = models.CharField(
@@ -206,4 +261,4 @@ class Withdrawal(UUIDModel, TimeStampedModel):
         ]
 
     def __str__(self):
-        return f"{self.reference} {self.usd_amount} USD ({self.status})"
+        return f"{self.reference} {self.usd_amount} USD + {self.fee_usd} fee ({self.status})"

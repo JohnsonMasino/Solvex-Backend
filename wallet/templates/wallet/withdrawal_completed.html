@@ -8,12 +8,18 @@
 <p style="margin:0 0 12px;font-size:15px;line-height:1.6;color:#374151;">Hi {{ user.full_name|default:user.email }},</p>
 <p style="margin:0 0 16px;font-size:15px;line-height:1.6;color:#374151;">
   Withdrawal <strong>{{ withdrawal.reference }}</strong> has been processed.
-  <strong>${{ withdrawal.usd_amount|floatformat:2 }}</strong> was deducted from your balance.
+  <strong>${{ total_usd|floatformat:2 }}</strong> was deducted from your balance{% if withdrawal.fee_usd %} (including a ${{ fee_usd|floatformat:2 }} fee){% endif %}.
 </p>
 
 <table role="presentation" cellpadding="0" cellspacing="0" style="width:100%;margin:0 0 16px;font-size:15px;color:#374151;">
-  <tr><td style="padding:6px 0;color:#6b7280;width:160px;">Sent</td><td style="padding:6px 0;"><strong>{{ withdrawal.usdt_amount|floatformat:"-6" }} USDT</strong></td></tr>
-  <tr><td style="padding:6px 0;color:#6b7280;">Network</td><td style="padding:6px 0;">{{ withdrawal.get_network_display }}</td></tr>
+  <tr><td style="padding:6px 0;color:#6b7280;width:160px;">Sent</td><td style="padding:6px 0;"><strong>{{ usdt_amount }} USDT</strong></td></tr>
+  <tr><td style="padding:6px 0;color:#6b7280;">Amount (USD)</td><td style="padding:6px 0;">${{ amount_usd|floatformat:2 }}</td></tr>
+  {% if withdrawal.fee_usd %}
+  <tr><td style="padding:6px 0;color:#6b7280;">Fee ({{ fee_percent }}%)</td><td style="padding:6px 0;">${{ fee_usd|floatformat:2 }}</td></tr>
+  {% endif %}
+  <tr><td style="padding:6px 0;color:#6b7280;">Total deducted</td><td style="padding:6px 0;"><strong>${{ total_usd|floatformat:2 }}</strong></td></tr>
+  <tr><td style="padding:6px 0;color:#6b7280;">Rate</td><td style="padding:6px 0;">1 USDT = ${{ rate }}</td></tr>
+  <tr><td style="padding:6px 0;color:#6b7280;">Network</td><td style="padding:6px 0;">{{ network_label }}</td></tr>
   <tr><td style="padding:6px 0;color:#6b7280;">To address</td><td style="padding:6px 0;font-family:monospace;word-break:break-all;">{{ withdrawal.address }}</td></tr>
   {% if withdrawal.admin_tx_hash %}
   <tr><td style="padding:6px 0;color:#6b7280;">Transaction hash</td><td style="padding:6px 0;font-family:monospace;word-break:break-all;">{{ withdrawal.admin_tx_hash }}</td></tr>

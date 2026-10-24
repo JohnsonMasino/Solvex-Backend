@@ -68,8 +68,8 @@ class WalletTransactionAdmin(ReadOnlyAdmin):
 class DepositAdmin(admin.ModelAdmin):
     EDITABLE = ("status", "decline_reason", "admin_note")
 
-    list_display = ("reference", "user_email", "network", "usdt_amount", "usd_amount", "status", "created_at")
-    list_filter = ("status", "network", "created_at")
+    list_display = ("reference", "user_email", "network", "asset", "amount", "usd_amount", "status", "created_at")
+    list_filter = ("status", "asset", "network", "created_at")
     search_fields = ("reference", "user__email", "tx_hash")
     date_hierarchy = "created_at"
     ordering = ("-created_at",)
@@ -78,7 +78,7 @@ class DepositAdmin(admin.ModelAdmin):
 
     fieldsets = (
         ("Request", {"fields": (
-            "user_email", "reference", "network", "usdt_amount", "rate", "usd_amount",
+            "user_email", "reference", "network", "asset", "amount", "rate", "usd_amount",
             "deposit_address", "tx_hash", "created_at",
         )}),
         ("Processing", {"fields": (
@@ -191,7 +191,10 @@ class WithdrawalStatusFilter(admin.SimpleListFilter):
 class WithdrawalAdmin(admin.ModelAdmin):
     EDITABLE = ("status", "admin_tx_hash", "failure_reason", "admin_note")
 
-    list_display = ("reference", "user_email", "network", "usd_amount", "usdt_amount", "status", "created_at")
+    list_display = (
+        "reference", "user_email", "network", "usd_amount", "fee_usd", "total_usd",
+        "usdt_amount", "status", "created_at",
+    )
     list_filter = (WithdrawalStatusFilter, "network", "created_at")
     search_fields = ("reference", "user__email", "address")
     date_hierarchy = "created_at"
@@ -202,7 +205,9 @@ class WithdrawalAdmin(admin.ModelAdmin):
     fieldsets = (
         ("Payout instruction", {"fields": ("send_instruction",)}),
         ("Request", {"fields": (
-            "user_email", "reference", "network", "address", "usd_amount", "rate", "usdt_amount",
+            "user_email", "reference", "network", "address",
+            "usd_amount", "fee_percent", "fee_usd", "total_usd",
+            "rate", "usdt_amount",
             "confirmed_at", "expires_at", "created_at",
         )}),
         ("Processing", {"fields": (
@@ -218,10 +223,13 @@ class WithdrawalAdmin(admin.ModelAdmin):
     def send_instruction(self, obj):
         if obj is None or obj.pk is None:
             return "-"
+        total = obj.total_usd if obj.total_usd else obj.usd_amount
         return format_html(
             "Send exactly <strong style='font-size:1.25em'>{} USDT</strong> on <strong>{}</strong> to "
-            "<code style='user-select:all'>{}</code>",
+            "<code style='user-select:all'>{}</code><br>"
+            "<small>User receives ${} · fee ${} ({}%) · ${} will be deducted from their balance when completed.</small>",
             format(obj.usdt_amount.normalize(), "f"), obj.get_network_display(), obj.address,
+            obj.usd_amount, obj.fee_usd, format(obj.fee_percent.normalize(), "f"), total,
         )
 
     def has_add_permission(self, request):
@@ -268,7 +276,7 @@ class WithdrawalAdmin(admin.ModelAdmin):
             messages.error(request, _err_text(exc))
         Withdrawal.objects.filter(pk=obj.pk).update(**updates)
 
-    @admin.action(description="Mark selected completed (deducts USD)")
+    @admin.action(description="Mark selected completed (deducts amount + fee)")
     def mark_completed(self, request, queryset):
         done = skipped = 0
         for w in queryset.select_related("user"):
@@ -282,7 +290,7 @@ class WithdrawalAdmin(admin.ModelAdmin):
         if skipped:
             messages.error(request, f"{skipped} withdrawal(s) skipped: only pending (OTP-confirmed) withdrawals can be completed.")
 
-    @admin.action(description="Mark selected failed (releases funds)")
+    @admin.action(description="Mark selected failed (releases amount + fee)")
     def mark_failed(self, request, queryset):
         done = skipped = missing = 0
         for w in queryset.select_related("user"):

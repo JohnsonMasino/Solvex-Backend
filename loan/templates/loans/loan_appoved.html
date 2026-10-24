@@ -1,0 +1,33 @@
+{% extends "core/email_base.html" %}
+
+{% block title %}Loan approved{% endblock %}
+
+{% block content %}
+<h2 style="margin:0 0 16px;font-size:20px;color:#047857;">Your loan has been approved &#10003;</h2>
+
+<p style="margin:0 0 12px;font-size:15px;line-height:1.6;color:#374151;">Hi {{ user.full_name|default:user.email }},</p>
+<p style="margin:0 0 16px;font-size:15px;line-height:1.6;color:#374151;">
+  Good news! Your loan <strong>{{ loan.reference }}</strong> of <strong>${{ principal|floatformat:2 }}</strong> has been approved and is now active.
+  Please repay it on or before <strong>{{ due_at|date:"j M Y, H:i" }} UTC</strong>.
+</p>
+
+<table role="presentation" cellpadding="0" cellspacing="0" style="width:100%;margin:0 0 20px;font-size:15px;color:#374151;">
+  <tr><td style="padding:6px 0;color:#6b7280;width:180px;">Loan amount</td><td style="padding:6px 0;">${{ principal|floatformat:2 }}</td></tr>
+  <tr><td style="padding:6px 0;color:#6b7280;">Duration</td><td style="padding:6px 0;">{{ duration_label }}</td></tr>
+  <tr><td style="padding:6px 0;color:#6b7280;">Daily interest</td><td style="padding:6px 0;">{{ daily_rate }}% of the loan amount (${{ daily_interest_usd|floatformat:2 }} per day)</td></tr>
+  <tr><td style="padding:6px 0;color:#6b7280;">Reminder date</td><td style="padding:6px 0;">{{ halfway_at|date:"j M Y" }}</td></tr>
+  <tr><td style="padding:6px 0;color:#6b7280;">Due date</td><td style="padding:6px 0;"><strong>{{ due_at|date:"j M Y, H:i" }} UTC</strong></td></tr>
+</table>
+
+<div style="margin:0 0 16px;padding:12px 16px;background:#fffbeb;border-left:4px solid #d97706;border-radius:4px;font-size:14px;line-height:1.6;color:#92400e;">
+  If the loan is not fully repaid by the due date, the daily interest rises from {{ daily_rate }}% to <strong>{{ overdue_rate }}%</strong>.
+</div>
+
+<p style="margin:0 0 16px;font-size:13px;line-height:1.6;color:#6b7280;">
+  Any deposit you make while this loan is active is automatically used to pay it down (fully or in part).
+</p>
+
+<p style="margin:0 0 24px;text-align:center;">
+  <a href="{{ loan_url }}" style="display:inline-block;background:#111827;color:#ffffff;text-decoration:none;padding:12px 28px;border-radius:6px;font-size:15px;font-weight:bold;">View my loan</a>
+</p>
+{% endblock %}

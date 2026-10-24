@@ -9,13 +9,28 @@ wallet/services.py - ALL wallet business logic + the public cross-app contract (
     settle_trade(user, principal, pnl, reference) -> None
     complete_deposit / decline_deposit / complete_withdrawal / fail_withdrawal   (admin only)
 
+Deposits accept USDT (BEP20 / ERC20 / TRC20), BTC (btc) and ETH (eth). Each network maps to
+one asset; the USD credit is frozen at creation as amount x the LIVE market rate fetched at
+that moment (see wallet/rates.py).
+
+Withdrawals are paid in USDT only (BEP20 / ERC20 / TRC20) and ALSO use the live USDT/USD rate,
+frozen at creation. A withdrawal fee (settings.WITHDRAWAL_FEE_PERCENT, default 1.5%) is added on
+top of the amount the user asked to receive:
+
+    usd_amount   what the user receives (USD value)
+    fee_usd      usd_amount x fee_percent / 100
+    total_usd    usd_amount + fee_usd  -> reserved when the OTP is confirmed, removed from the
+                                          balance when an admin marks the withdrawal completed,
+                                          released in full (fee included) if it fails
+    usdt_amount  usd_amount / live USDT rate -> exact USDT the admin sends
+
 Locking order everywhere: wallet row first, then the deposit/withdrawal row.
 """
 import logging
 import math
 import re
 from datetime import timedelta
-from decimal import Decimal
+from decimal import ROUND_DOWN, Decimal
 
 from django.conf import settings
 from django.db import IntegrityError, transaction
@@ -25,9 +40,10 @@ from core.exceptions import BusinessError
 from core.utils import generate_otp, hash_value, money, verify_hash
 from core.utils import usdt as to_usdt
 
-from . import emails
+from . import emails, rates
 from .models import (
-    Deposit, DepositStatus, EntryType, Network, Wallet, WalletTransaction,
+    ASSET_DECIMALS, NETWORK_ASSET, USDT_NETWORKS,
+    Asset, Deposit, DepositStatus, EntryType, Network, Wallet, WalletTransaction,
     Withdrawal, WithdrawalStatus, generate_reference,
 )
 
@@ -35,13 +51,18 @@ logger = logging.getLogger(__name__)
 
 ZERO = Decimal("0.00")
 RATE_Q = Decimal("0.000001")
+PERCENT_Q = Decimal("0.01")
+HUNDRED = Decimal("100")
 CRON_BATCH_SIZE = 100
 
 ADDRESS_REGEX = {
     Network.BEP20: r"^0x[a-fA-F0-9]{40}$",
     Network.ERC20: r"^0x[a-fA-F0-9]{40}$",
     Network.TRC20: r"^T[1-9A-HJ-NP-Za-km-z]{33}$",
+    Network.BTC: r"^(bc1[02-9ac-hj-np-z]{11,71}|[13][a-km-zA-HJ-NP-Z1-9]{25,34})$",
+    Network.ETH: r"^0x[a-fA-F0-9]{40}$",
 }
+
 
 
 # --------------------------------------------------------------------------- #
@@ -78,6 +99,11 @@ def _locked_wallet(user) -> Wallet:
 
 def _fmt(value) -> str:
     return format(money(value), "f")
+
+
+def _fmt_amount(value) -> str:
+    """Crypto amount without trailing zeros / exponent, e.g. 0.005 or 500."""
+    return format(Decimal(value).normalize(), "f")
 
 
 def balance_strings(wallet) -> dict:
@@ -195,34 +221,83 @@ def settle_trade(user, principal, pnl, reference) -> None:
 
 
 # --------------------------------------------------------------------------- #
-# Config / rate helpers
+# Config / rate / fee helpers
 # --------------------------------------------------------------------------- #
-def _rate() -> Decimal:
-    rate = Decimal(str(settings.USDT_USD_RATE)).quantize(RATE_Q)
-    if rate <= 0:
-        raise BusinessError("rate_unavailable", "Exchange rate is not configured.", status=503)
-    return rate
+def _withdrawal_fee_percent() -> Decimal:
+    """Fee rate in percent (1.5 means 1.5%), from settings.WITHDRAWAL_FEE_PERCENT."""
+    percent = Decimal(str(getattr(settings, "WITHDRAWAL_FEE_PERCENT", "1.5"))).quantize(PERCENT_Q)
+    if percent < 0 or percent >= HUNDRED:
+        raise BusinessError("server_error", "Withdrawal fee is misconfigured.", status=500)
+    return percent
+
+
+def calculate_withdrawal_amounts(usd_amount, fee_percent=None) -> dict:
+    """Single source of truth for the fee maths.
+
+    `usd_amount` is what the user receives. The fee is added on top of it.
+    Returns Decimals: usd_amount, fee_percent, fee_usd, total_usd.
+    """
+    usd_amount = money(usd_amount)
+    percent = _withdrawal_fee_percent() if fee_percent is None else Decimal(fee_percent)
+    fee_usd = money(usd_amount * percent / HUNDRED)
+    return {
+        "usd_amount": usd_amount,
+        "fee_percent": percent,
+        "fee_usd": fee_usd,
+        "total_usd": money(usd_amount + fee_usd),
+    }
+
+
+def _total_usd(w) -> Decimal:
+    """What a withdrawal reserves / removes from the balance. Falls back to usd_amount for any
+    legacy row created before fees existed."""
+    return w.total_usd if w.total_usd and w.total_usd > 0 else w.usd_amount
 
 
 def _deposit_address(network) -> str:
-    return (getattr(settings, f"DEPOSIT_ADDRESS_{str(network).upper()}", "") or "").strip()
+    key = str(getattr(network, "value", network)).upper()
+    return (getattr(settings, f"DEPOSIT_ADDRESS_{key}", "") or "").strip()
+
+
+def _quantize_amount(asset, value) -> Decimal:
+    """Round DOWN to the asset's supported precision (never credit more than was requested)."""
+    places = ASSET_DECIMALS[Asset(asset)]
+    return Decimal(str(value)).quantize(Decimal(10) ** -places, rounding=ROUND_DOWN)
 
 
 def get_config() -> dict:
+    networks = []
+    fetched = []
+    for value, label in Network.choices:
+        network = Network(value)
+        asset = NETWORK_ASSET[network]
+        address = _deposit_address(network) or None
+        quote = rates.get_quote_or_none(asset)  # live price (cached for RATE_CACHE_SECONDS)
+        if quote is not None:
+            fetched.append(quote.fetched_at)
+        networks.append({
+            "value": value,
+            "label": str(label),
+            "asset": asset.value,
+            "decimals": ASSET_DECIMALS[asset],
+            "rate": format(quote.rate, "f") if quote else None,
+            "rate_updated_at": quote.fetched_at.isoformat() if quote else None,
+            "deposit_address": address,
+            "deposit_enabled": bool(address and quote),
+            # Withdrawals are USDT-only and need a live USDT rate.
+            "withdrawal_enabled": bool(network in USDT_NETWORKS and quote),
+            "address_regex": ADDRESS_REGEX[network],
+        })
+    usdt_quote = rates.get_quote_or_none(Asset.USDT)
     return {
-        "rate": format(_rate(), "f"),
+        "rate": format(usdt_quote.rate, "f") if usdt_quote else None,  # deprecated: use networks[].rate
         "currency": "USD",
         "min_deposit_usd": _fmt(settings.MIN_DEPOSIT_AMOUNT),
         "min_withdrawal_usd": _fmt(settings.MIN_WITHDRAWAL_AMOUNT),
-        "networks": [
-            {
-                "value": value,
-                "label": str(label),
-                "deposit_address": _deposit_address(value) or None,
-                "address_regex": ADDRESS_REGEX[value],
-            }
-            for value, label in Network.choices
-        ],
+        "withdrawal_fee_percent": _fmt_amount(_withdrawal_fee_percent()),
+        "networks": networks,
+        "rates_updated_at": min(fetched).isoformat() if fetched else None,
+        "rate_refresh_seconds": rates.refresh_seconds(),
         "withdrawal_request_expiry_minutes": settings.PENDING_TRANSACTION_EXPIRY_MINUTES,
     }
 
@@ -238,7 +313,11 @@ def _new_reference(model, prefix) -> str:
 # --------------------------------------------------------------------------- #
 # Deposits (user side)
 # --------------------------------------------------------------------------- #
-def create_deposit(user, network, usdt_amount, tx_hash="") -> Deposit:
+def create_deposit(user, network, amount, tx_hash="") -> Deposit:
+    """`amount` is in the asset's own units (USDT, BTC or ETH, decided by `network`)."""
+    network = Network(network)
+    asset = NETWORK_ASSET[network]
+
     address = _deposit_address(network)
     if not address:
         raise BusinessError(
@@ -247,9 +326,11 @@ def create_deposit(user, network, usdt_amount, tx_hash="") -> Deposit:
             status=503,
         )
 
-    usdt_amount = to_usdt(usdt_amount)
-    rate = _rate()
-    usd_amount = money(usdt_amount * rate)
+    amount = _quantize_amount(asset, amount)
+    if amount <= 0:
+        raise BusinessError("invalid_amount", "Amount must be greater than zero.")
+    rate = rates.get_quote(asset).rate  # live rate at this moment; frozen on the deposit
+    usd_amount = money(amount * rate)
     min_deposit = money(settings.MIN_DEPOSIT_AMOUNT)
     if usd_amount < min_deposit:
         raise BusinessError(
@@ -280,8 +361,9 @@ def create_deposit(user, network, usdt_amount, tx_hash="") -> Deposit:
                 deposit = Deposit.objects.create(
                     user=user,
                     reference=_new_reference(Deposit, "DEP-"),
-                    network=network,
-                    usdt_amount=usdt_amount,
+                    network=network.value,
+                    asset=asset.value,
+                    amount=amount,
                     rate=rate,
                     usd_amount=usd_amount,
                     deposit_address=address,
@@ -321,8 +403,11 @@ def complete_deposit(deposit, admin_user) -> None:
         if _existing_entry(EntryType.DEPOSIT, reference) is None:
             _apply(
                 wallet, EntryType.DEPOSIT, locked.usd_amount, balance=locked.usd_amount,
-                reference=reference, description=f"Deposit {locked.reference}",
+                reference=reference,
+                description=f"Deposit {locked.reference} ({_fmt_amount(locked.amount)} {str(locked.asset).upper()})",
             )
+            from loan import services as loan_services  # lazy import avoids a circular import
+            loan_services.apply_deposit_to_loan(locked, wallet)
         locked.status = DepositStatus.COMPLETED
         locked.processed_by = admin_user
         locked.processed_at = timezone.now()
@@ -346,7 +431,7 @@ def decline_deposit(deposit, admin_user, reason="") -> None:
 
 
 # --------------------------------------------------------------------------- #
-# Withdrawals (user side)
+# Withdrawals (user side) - USDT only, live rate, fee on top
 # --------------------------------------------------------------------------- #
 def validate_address(network, address) -> str:
     address = (address or "").strip()
@@ -357,18 +442,21 @@ def validate_address(network, address) -> str:
     return address
 
 
-def _check_funds(wallet, amount):
-    """Raises insufficient_balance / funds_in_use with balances in `data`."""
-    if amount > wallet.balance:
+def _check_funds(wallet, total_usd):
+    """`total_usd` = amount + fee. Raises insufficient_balance / funds_in_use with balances
+    (plus the required `total_usd`) in `data`."""
+    data = {**balance_strings(wallet), "total_usd": _fmt(total_usd)}
+    if total_usd > wallet.balance:
         raise BusinessError(
-            "insufficient_balance", "Withdrawal amount exceeds your account balance.",
-            data=balance_strings(wallet),
+            "insufficient_balance",
+            "Your balance is not enough to cover this withdrawal and its fee.",
+            data=data,
         )
-    if amount > wallet.available_balance:
+    if total_usd > wallet.available_balance:
         raise BusinessError(
             "funds_in_use",
             "Part of your balance is in active trades or pending withdrawals and can't be withdrawn.",
-            data=balance_strings(wallet),
+            data=data,
         )
 
 
@@ -377,7 +465,15 @@ def _otp_expiry():
 
 
 def create_withdrawal(user, network, address, usd_amount):
-    """Returns (withdrawal, otp_sent). Funds are NOT reserved until the OTP is confirmed."""
+    """Returns (withdrawal, otp_sent). Funds are NOT reserved until the OTP is confirmed.
+
+    `usd_amount` is what the user wants to RECEIVE; the fee is added on top (total_usd)."""
+    if Network(network) not in USDT_NETWORKS:
+        raise BusinessError(
+            "withdrawal_network_unsupported",
+            "Withdrawals are only available in USDT (BEP20, ERC20 or TRC20).",
+            status=400,
+        )
     usd_amount = money(usd_amount)
     min_withdrawal = money(settings.MIN_WITHDRAWAL_AMOUNT)
     if usd_amount < min_withdrawal:
@@ -387,14 +483,18 @@ def create_withdrawal(user, network, address, usd_amount):
             data={"min_withdrawal_usd": _fmt(min_withdrawal)},
         )
     address = validate_address(network, address)
-    rate = _rate()
+    from loan import services as loan_services
+    loan_services.assert_can_withdraw(user)
+
+    rate = rates.get_quote(Asset.USDT).rate  # live USDT/USD rate (503 rate_unavailable if none)
+    amounts = calculate_withdrawal_amounts(usd_amount)
     otp = generate_otp()
     now = timezone.now()
     expires_at = _otp_expiry()
 
     with transaction.atomic():
         wallet = _locked_wallet(user)
-        _check_funds(wallet, usd_amount)
+        _check_funds(wallet, amounts["total_usd"])
 
         Withdrawal.objects.filter(user=user, status=WithdrawalStatus.AWAITING_OTP).update(
             status=WithdrawalStatus.CANCELLED, updated_at=now
@@ -404,9 +504,12 @@ def create_withdrawal(user, network, address, usd_amount):
             reference=_new_reference(Withdrawal, "WDR-"),
             network=network,
             address=address,
-            usd_amount=usd_amount,
+            usd_amount=amounts["usd_amount"],
+            fee_percent=amounts["fee_percent"],
+            fee_usd=amounts["fee_usd"],
+            total_usd=amounts["total_usd"],
             rate=rate,
-            usdt_amount=to_usdt(usd_amount / rate),
+            usdt_amount=to_usdt(amounts["usd_amount"] / rate),
             status=WithdrawalStatus.AWAITING_OTP,
             otp_expires_at=expires_at,
             otp_last_sent_at=now,
@@ -461,10 +564,12 @@ def confirm_withdrawal(user, withdrawal_id, otp):
                     data={"attempts_remaining": max_attempts - w.otp_attempts},
                 )
         else:
-            _check_funds(wallet, w.usd_amount)  # balance may have changed since creation
+            total = _total_usd(w)
+            _check_funds(wallet, total)  # balance may have changed since creation
             _apply(
-                wallet, EntryType.WITHDRAWAL_RESERVE, w.usd_amount, pending=w.usd_amount,
-                reference=f"withdrawal:{w.pk}", description=f"Withdrawal {w.reference} reserved",
+                wallet, EntryType.WITHDRAWAL_RESERVE, total, pending=total,
+                reference=f"withdrawal:{w.pk}",
+                description=f"Withdrawal {w.reference} reserved ({_fmt(w.usd_amount)} + {_fmt(w.fee_usd)} fee)",
             )
             w.status = WithdrawalStatus.PENDING
             w.confirmed_at = now
@@ -543,17 +648,20 @@ def cancel_withdrawal(user, withdrawal_id) -> Withdrawal:
 # Withdrawals (admin side)
 # --------------------------------------------------------------------------- #
 def complete_withdrawal(withdrawal, admin_user, tx_hash="") -> None:
+    """Removes amount + fee (total_usd) from the balance and clears the reservation."""
     with transaction.atomic():
         wallet = _locked_wallet(withdrawal.user)
         w = Withdrawal.objects.select_for_update().get(pk=withdrawal.pk)
         if w.status != WithdrawalStatus.PENDING:
             return
+        total = _total_usd(w)
         reference = f"withdrawal:{w.pk}"
         if _existing_entry(EntryType.WITHDRAWAL, reference) is None:
             _apply(
-                wallet, EntryType.WITHDRAWAL, w.usd_amount,
-                balance=-w.usd_amount, pending=-w.usd_amount,
-                reference=reference, description=f"Withdrawal {w.reference} completed",
+                wallet, EntryType.WITHDRAWAL, total,
+                balance=-total, pending=-total,
+                reference=reference,
+                description=f"Withdrawal {w.reference} completed ({_fmt(w.usd_amount)} + {_fmt(w.fee_usd)} fee)",
             )
         w.status = WithdrawalStatus.COMPLETED
         w.admin_tx_hash = (tx_hash or "").strip()[:100]
@@ -565,6 +673,7 @@ def complete_withdrawal(withdrawal, admin_user, tx_hash="") -> None:
 
 
 def fail_withdrawal(withdrawal, admin_user, reason) -> None:
+    """Releases the whole reservation (amount AND fee). No fee is charged on a failed withdrawal."""
     reason = (reason or "").strip()
     if not reason:
         raise BusinessError("failure_reason_required", "A failure reason is required.")
@@ -573,10 +682,11 @@ def fail_withdrawal(withdrawal, admin_user, reason) -> None:
         w = Withdrawal.objects.select_for_update().get(pk=withdrawal.pk)
         if w.status != WithdrawalStatus.PENDING:
             return
+        total = _total_usd(w)
         reference = f"withdrawal:{w.pk}"
         if _existing_entry(EntryType.WITHDRAWAL_RELEASE, reference) is None:
             _apply(
-                wallet, EntryType.WITHDRAWAL_RELEASE, w.usd_amount, pending=-w.usd_amount,
+                wallet, EntryType.WITHDRAWAL_RELEASE, total, pending=-total,
                 reference=reference, description=f"Withdrawal {w.reference} failed - funds released",
             )
         w.status = WithdrawalStatus.FAILED

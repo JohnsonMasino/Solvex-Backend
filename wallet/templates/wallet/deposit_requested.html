@@ -8,7 +8,7 @@
 <p style="margin:0 0 12px;font-size:15px;line-height:1.6;color:#374151;">Hi {{ user.full_name|default:user.email }},</p>
 <p style="margin:0 0 16px;font-size:15px;line-height:1.6;color:#374151;">
   We've created deposit request <strong>{{ deposit.reference }}</strong>. To complete it, send exactly
-  <strong>{{ deposit.usdt_amount|floatformat:"-6" }} USDT</strong> on the <strong>{{ deposit.get_network_display }}</strong> network to the address below.
+  <strong>{{ amount }} {{ asset }}</strong> on the <strong>{{ network_label }}</strong> network to the address below.
 </p>
 
 <div style="margin:16px 0;padding:14px 16px;background:#f3f4f6;border-radius:6px;">
@@ -17,14 +17,18 @@
 </div>
 
 <table role="presentation" cellpadding="0" cellspacing="0" style="width:100%;margin:0 0 16px;font-size:15px;color:#374151;">
-  <tr><td style="padding:6px 0;color:#6b7280;width:160px;">Amount (USDT)</td><td style="padding:6px 0;">{{ deposit.usdt_amount|floatformat:"-6" }}</td></tr>
-  <tr><td style="padding:6px 0;color:#6b7280;">Credited (USD)</td><td style="padding:6px 0;">${{ deposit.usd_amount|floatformat:2 }} (rate {{ deposit.rate|floatformat:"-6" }})</td></tr>
-  <tr><td style="padding:6px 0;color:#6b7280;">Network</td><td style="padding:6px 0;">{{ deposit.get_network_display }}</td></tr>
+  <tr><td style="padding:6px 0;color:#6b7280;width:160px;">Amount ({{ asset }})</td><td style="padding:6px 0;">{{ amount }} {{ asset }}</td></tr>
+  <tr><td style="padding:6px 0;color:#6b7280;">Credited (USD)</td><td style="padding:6px 0;">${{ usd_amount|floatformat:2 }} (1 {{ asset }} = ${{ rate }})</td></tr>
+  <tr><td style="padding:6px 0;color:#6b7280;">Network</td><td style="padding:6px 0;">{{ network_label }}</td></tr>
 </table>
 
 <div style="margin:0 0 16px;padding:12px 16px;background:#fffbeb;border-left:4px solid #d97706;border-radius:4px;font-size:14px;line-height:1.6;color:#92400e;">
-  Only send USDT on the network shown. Funds sent on a different network or to a different address may be lost and cannot be recovered.
+  Only send {{ asset }} on the network shown. Funds sent on a different network or to a different address may be lost and cannot be recovered.
 </div>
+
+<p style="margin:0 0 12px;font-size:13px;line-height:1.6;color:#6b7280;">
+  The USD value above was locked at the live market rate when this request was created.
+</p>
 
 <p style="margin:0;font-size:13px;line-height:1.6;color:#6b7280;">
   Once we confirm your transfer, the USD equivalent is added to your balance and you'll receive another email.
