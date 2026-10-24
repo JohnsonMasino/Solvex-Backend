@@ -48,6 +48,7 @@ INSTALLED_APPS = [
     "wallet",
     "referral",
     "trade",
+    "loan",
 ]
 
 MIDDLEWARE = [
@@ -152,7 +153,7 @@ SPECTACULAR_SETTINGS = {
     "COMPONENT_SPLIT_REQUEST": True,
     "SECURITY": [{"jwtAuth": []}],
     "TAGS": [{"name": n} for n in
-             ["System", "Authentication", "Profile", "KYC", "Wallet", "Referral", "Trade", "Cron"]],
+             ["System", "Authentication", "Profile", "KYC", "Wallet", "Referral", "Trade", "Cron", "Loan"]],
 }
 
 # --------------------------------------------------------------------------- email (Mailgun)
@@ -182,12 +183,21 @@ MIN_DEPOSIT_AMOUNT = config("MIN_DEPOSIT_AMOUNT", default="10.00", cast=Decimal)
 MIN_WITHDRAWAL_AMOUNT = config("MIN_WITHDRAWAL_AMOUNT", default="20.00", cast=Decimal)
 PENDING_TRANSACTION_EXPIRY_MINUTES = config("PENDING_TRANSACTION_EXPIRY_MINUTES", default=5, cast=int)
 USDT_USD_RATE = config("USDT_USD_RATE", default="1.00", cast=Decimal)
+BTC_USD_RATE = config("BTC_USD_RATE", default="0", cast=Decimal)
+ETH_USD_RATE = config("ETH_USD_RATE", default="0", cast=Decimal)
+DEPOSIT_ADDRESS_BTC = config("DEPOSIT_ADDRESS_BTC", default="")
+DEPOSIT_ADDRESS_ETH = config("DEPOSIT_ADDRESS_ETH", default="")
 DEPOSIT_ADDRESS_BEP20 = config("DEPOSIT_ADDRESS_BEP20", default="")
 DEPOSIT_ADDRESS_ERC20 = config("DEPOSIT_ADDRESS_ERC20", default="")
 DEPOSIT_ADDRESS_TRC20 = config("DEPOSIT_ADDRESS_TRC20", default="")
 REFERRAL_BONUS_USD = config("REFERRAL_BONUS_USD", default="3.00", cast=Decimal)
 TRADE_MIN_AMOUNT = config("TRADE_MIN_AMOUNT", default="10.00", cast=Decimal)
 TRADE_MAX_LEVERAGE = config("TRADE_MAX_LEVERAGE", default=100, cast=int)
+WITHDRAWAL_FEE_PERCENT = config("WITHDRAWAL_FEE_PERCENT", default="1.5", cast=Decimal)
+# Optional:
+RATE_CACHE_SECONDS = 30
+RATE_MAX_STALE_SECONDS = 300
+RATE_PROVIDERS = ("coingecko", "cryptocompare", "coinbase", "kraken", "bitstamp")
 TRADE_SIM_MIN_MOVE_PCT = config("TRADE_SIM_MIN_MOVE_PCT", default="-2.0", cast=Decimal)
 TRADE_SIM_MAX_MOVE_PCT = config("TRADE_SIM_MAX_MOVE_PCT", default="3.0", cast=Decimal)
 TRADING_TIMEZONE = config("TRADING_TIMEZONE", default="UTC")
@@ -199,6 +209,23 @@ WALLET_MAX_OTP_RESENDS = config("WALLET_MAX_OTP_RESENDS", default=3, cast=int)
 KYC_MIN_AGE = int(os.environ.get("KYC_MIN_AGE", 18))
 KYC_MAX_ATTEMPTS = int(os.environ.get("KYC_MAX_ATTEMPTS", 5))
 KYC_POLICY_VERSION = os.environ.get("KYC_POLICY_VERSION", "1.0")
+
+
+# --------------------------------------------------------------------------- loan
+LOAN_MIN_AMOUNT = config("LOAN_MIN_AMOUNT", default="10.00", cast=Decimal)
+LOAN_MAX_AMOUNT = config("LOAN_MAX_AMOUNT", default="10000.00", cast=Decimal)
+LOAN_MAX_ELIGIBLE_BALANCE = config("LOAN_MAX_ELIGIBLE_BALANCE", default="50.00", cast=Decimal)  # must be BELOW this
+LOAN_DAILY_INTEREST_PERCENT = config("LOAN_DAILY_INTEREST_PERCENT", default="0.20", cast=Decimal)
+LOAN_OVERDUE_INTEREST_PERCENT = config("LOAN_OVERDUE_INTEREST_PERCENT", default="1.00", cast=Decimal)
+# False: on approval the principal is recorded as debt only (wallet.balance untouched).
+# True:  on approval the principal is also credited to wallet.balance.
+LOAN_CREDIT_TO_WALLET = config("LOAN_CREDIT_TO_WALLET", default=True, cast=bool)
+LOAN_BLOCK_WITHDRAWALS_WHILE_ACTIVE = config("LOAN_BLOCK_WITHDRAWALS_WHILE_ACTIVE", default=False, cast=bool)
+FRONTEND_LOAN_PATH = config("FRONTEND_LOAN_PATH", default="/dashboard/loan")
+FRONTEND_DEPOSIT_PATH = config("FRONTEND_DEPOSIT_PATH", default="/dashboard/deposit")
+
+
+BACKEND_URL = config("BACKEND_URL", default="")
 
 
 # --------------------------------------------------------------------------- production hardening

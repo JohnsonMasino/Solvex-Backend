@@ -21,6 +21,7 @@ urlpatterns = [
     path("api/profile/", include("profiles.urls")),
     path("api/kyc/", include("kyc.urls")),
     path("api/wallet/", include("wallet.urls")),
+    path("api/loans/", include("loan.urls")),
     path("api/referrals/", include("referral.urls")),
     path("api/trades/", include("trade.urls")),
 
@@ -28,6 +29,7 @@ urlpatterns = [
     path("api/cron/auth/", include("authentication.cron_urls")),
     path("api/cron/wallet/", include("wallet.cron_urls")),
     path("api/cron/trades/", include("trade.cron_urls")),
+    path("api/cron/loans/", include("loan.cron_urls")),
 
     # Docs
     path("api/schema/", SpectacularAPIView.as_view(), name="schema"),

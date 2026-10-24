@@ -34,7 +34,7 @@ def _paginated(view, request, queryset, serializer_class):
     return paginator.get_paginated_response(serializer_class(page, many=True).data)
 
 
-def _fmt_usdt(value) -> str:
+def _fmt_amount(value) -> str:
     return format(value.normalize(), "f")
 
 
@@ -46,7 +46,17 @@ class WalletSummaryView(APIView):
 
     @extend_schema(
         tags=[TAG], summary="Wallet summary",
-        description="Returns the caller's USD balance buckets. Tier 1 users see zeros.",
+        description=(
+            "Returns the caller's USD balance buckets. Tier 1 users see zeros.\n\n"
+            "- `balance`: total funds.\n"
+            "- `net_balance`: `balance - loan_outstanding`\n"
+            "- `loan_outstanding`: total amount owed on active loans.\n"
+            "- `locked_balance`: margin locked in open trades.\n"
+            "- `pending_withdrawal_balance`: funds reserved by confirmed withdrawals awaiting admin processing "
+            "(**amount + fee**).\n"
+            "- `available_balance`: `balance - locked_balance - pending_withdrawal_balance`. Only this can be "
+            "traded or withdrawn."
+        ),
         responses={
             200: success_response_doc("WalletSummarySuccess", "Wallet balances.", example=docs.WALLET_EXAMPLE),
             401: docs.UNAUTH,
@@ -60,8 +70,16 @@ class WalletConfigView(APIView):
     permission_classes = [IsAuthenticated]
 
     @extend_schema(
-        tags=[TAG], summary="Deposit / withdrawal configuration",
-        description="Returns the USDT/USD rate, minimums, supported networks, deposit addresses and address regexes for live conversion and validation.",
+        tags=[TAG], summary="Deposit / withdrawal configuration (with live rates and fee)",
+        description=(
+            "Returns the supported networks, deposit addresses, address regexes, minimums, the **live USD rate** "
+            "for each network's asset (USDT / BTC / ETH) and the **withdrawal fee** (`withdrawal_fee_percent`, "
+            "currently 1.5). Poll this endpoint every `rate_refresh_seconds` to keep the deposit and withdrawal "
+            "estimates current.\n\n"
+            "`withdrawal_enabled` is `true` only for USDT networks that currently have a live rate."
+            + docs.LIVE_RATE_GUIDE
+            + docs.WITHDRAWAL_FEE_GUIDE
+        ),
         responses={
             200: success_response_doc("WalletConfigSuccess", "Wallet configuration.", example=docs.CONFIG_EXAMPLE),
             401: docs.UNAUTH,
@@ -82,7 +100,10 @@ class DepositListCreateView(APIView):
 
     @extend_schema(
         tags=[TAG], summary="My deposits",
-        description="Paginated list of the caller's deposit requests, newest first.",
+        description=(
+            "Paginated list of the caller's deposit requests, newest first. Each item shows the `asset`, the crypto "
+            "`amount`, and the `rate` / `usd_amount` that were frozen when the request was created."
+        ),
         parameters=[
             OpenApiParameter("status", str, enum=[s.value for s in DepositStatus], description="Filter by status."),
             *PAGE_PARAMS,
@@ -103,17 +124,28 @@ class DepositListCreateView(APIView):
 
     @extend_schema(
         tags=[TAG], summary="Create deposit request",
-        description="Creates a USDT deposit request (Tier 2 only). The company address is returned; funds are credited after admin confirmation.",
+        description=(
+            "Creates a deposit request (Tier 2 only) in USDT (`bep20`, `erc20`, `trc20`), BTC (`btc`) or ETH (`eth`). "
+            "The asset is decided by `network`. `amount` is in that asset's own units. The USD value is calculated "
+            "from the **live market rate at the moment of this request** and frozen on the deposit. The company "
+            "address is returned; funds are credited after admin confirmation."
+            + docs.LIVE_RATE_GUIDE
+        ),
         request=DepositCreateSerializer,
-        examples=[OpenApiExample("Valid request", value=docs.DEPOSIT_REQUEST, request_only=True)],
+        examples=[
+            OpenApiExample("USDT (TRC20)", value=docs.DEPOSIT_REQUEST, request_only=True),
+            OpenApiExample("Bitcoin", value=docs.DEPOSIT_REQUEST_BTC, request_only=True),
+        ],
         responses={
             201: success_response_doc(
                 "DepositCreatedSuccess", "Deposit request created.", example=docs.DEPOSIT_CREATED_EXAMPLE,
             ),
             400: docs.wallet_error(
-                "Invalid fields, or amount below the minimum.",
+                "Invalid fields, or amount below the minimum (checked in USD at the live rate).",
                 {"code": "validation_error", "message": "Please correct the highlighted fields.",
                  "errors": {"network": ['"ton" is not a valid choice.']}},
+                {"code": "validation_error", "message": "Please correct the highlighted fields.",
+                 "errors": {"amount": ["BTC supports at most 8 decimal places."]}},
                 {"code": "deposit_below_minimum", "message": "The minimum deposit is 10.00 USD.",
                  "data": {"min_deposit_usd": "10.00"}},
             ),
@@ -128,21 +160,29 @@ class DepositListCreateView(APIView):
             ),
             429: docs.THROTTLED,
             503: docs.wallet_error(
-                "Deposit address for this network is not configured.",
+                "Deposit address not configured for this network, or the live rate could not be fetched.",
                 {"code": "deposit_unavailable",
                  "message": "Deposits on this network are temporarily unavailable. Please try another network later."},
+                {"code": "rate_unavailable",
+                 "message": "The live BTC rate is temporarily unavailable. Please try again in a moment."},
             ),
         },
     )
     def post(self, request):
         s = DepositCreateSerializer(data=request.data)
         s.is_valid(raise_exception=True)
-        deposit = services.create_deposit(request.user, **s.validated_data)
+        data = s.validated_data
+        deposit = services.create_deposit(
+            request.user,
+            network=data["network"],
+            amount=data["amount"],
+            tx_hash=data.get("tx_hash", ""),
+        )
         return success_response(
             DepositSerializer(deposit).data,
             message=(
-                f"Deposit request created. Send exactly {_fmt_usdt(deposit.usdt_amount)} USDT "
-                f"on {deposit.network.upper()} to the address shown."
+                f"Deposit request created. Send exactly {_fmt_amount(deposit.amount)} {deposit.asset.upper()} "
+                f"on the {deposit.network.upper()} network to the address shown."
             ),
             status=201,
         )
@@ -208,7 +248,13 @@ class WithdrawalListCreateView(APIView):
 
     @extend_schema(
         tags=[TAG], summary="My withdrawals",
-        description="Paginated withdrawal history, newest first. OTP data and admin notes are never exposed.",
+        description=(
+            "Paginated withdrawal history, newest first. OTP data and admin notes are never exposed.\n\n"
+            "Each item includes the fee breakdown: `usd_amount` (what the user receives), `fee_percent`, `fee_usd`, "
+            "`total_usd` (= `usd_amount + fee_usd`, what leaves the balance), `usdt_amount` and the live `rate` "
+            "that was frozen at creation. Withdrawals created before fees existed have `fee_usd: \"0.00\"` and "
+            "`total_usd` equal to `usd_amount`."
+        ),
         parameters=[
             OpenApiParameter("status", str, enum=[s.value for s in WithdrawalStatus], description="Filter by status."),
             *PAGE_PARAMS,
@@ -229,7 +275,17 @@ class WithdrawalListCreateView(APIView):
 
     @extend_schema(
         tags=[TAG], summary="Start withdrawal",
-        description="Validates the request (Tier 2 only) and emails a one-time code. Funds are reserved only after the code is confirmed.",
+        description=(
+            "Validates the request (Tier 2 only) and emails a one-time code. Funds are reserved only after the code "
+            "is confirmed. **Withdrawals are USDT only** (`bep20`, `erc20`, `trc20`); BTC / ETH networks are "
+            "rejected (`withdrawal_enabled` is `false` for them in the wallet config).\n\n"
+            "`usd_amount` is the USD value the user wants to **receive**. The server converts it to USDT at the "
+            "**live USDT/USD rate**, adds the **withdrawal fee** (`withdrawal_fee_percent`, currently 1.5%) on top, "
+            "and freezes everything on the withdrawal: `usd_amount`, `fee_percent`, `fee_usd`, `total_usd`, "
+            "`usdt_amount` and `rate`. The user needs `total_usd` available, and `total_usd` is what is removed "
+            "from the balance when the withdrawal is completed."
+            + docs.WITHDRAWAL_FEE_GUIDE
+        ),
         request=WithdrawalCreateSerializer,
         examples=[OpenApiExample("Valid request", value=docs.WITHDRAWAL_REQUEST, request_only=True)],
         responses={
@@ -238,21 +294,27 @@ class WithdrawalListCreateView(APIView):
                 message="We've sent a 6-digit code to your email to confirm this withdrawal.",
             ),
             400: docs.wallet_error(
-                "Invalid fields, address, amount or insufficient funds.",
+                "Invalid fields, address, amount, or insufficient funds (the fee is included in the amount needed).",
                 {"code": "validation_error", "message": "Please correct the highlighted fields.",
                  "errors": {"usd_amount": ["A valid number is required."]}},
                 {"code": "invalid_address", "message": "Enter a valid BEP20 wallet address."},
                 {"code": "withdrawal_below_minimum", "message": "The minimum withdrawal is 20.00 USD.",
                  "data": {"min_withdrawal_usd": "20.00"}},
-                {"code": "insufficient_balance", "message": "Withdrawal amount exceeds your account balance.",
-                 "data": docs.BALANCES},
+                {"code": "insufficient_balance",
+                 "message": "Your balance is not enough to cover this withdrawal and its fee.",
+                 "data": docs.BALANCES_WITH_TOTAL},
                 {"code": "funds_in_use",
                  "message": "Part of your balance is in active trades or pending withdrawals and can't be withdrawn.",
-                 "data": docs.BALANCES},
+                 "data": docs.BALANCES_WITH_TOTAL},
             ),
             401: docs.UNAUTH,
             403: docs.KYC_REQUIRED,
             429: docs.THROTTLED,
+            503: docs.wallet_error(
+                "The live USDT rate could not be fetched from any provider.",
+                {"code": "rate_unavailable",
+                 "message": "The live USDT rate is temporarily unavailable. Please try again in a moment."},
+            ),
         },
     )
     def post(self, request):
@@ -278,7 +340,11 @@ class WithdrawalDetailView(APIView):
 
     @extend_schema(
         tags=[TAG], summary="Withdrawal detail",
-        description="Returns one of the caller's withdrawals. Other users' ids return 404.",
+        description=(
+            "Returns one of the caller's withdrawals. Other users' ids return 404.\n\n"
+            "Show the frozen breakdown from the response and never recompute it: `usd_amount` (user receives), "
+            "`fee_usd` (`fee_percent`), `total_usd` (deducted from the balance), `usdt_amount` and `rate`."
+        ),
         parameters=[ID_PARAM],
         responses={
             200: success_response_doc("WithdrawalDetailSuccess", "Withdrawal.", example=docs.WITHDRAWAL_DETAIL_EXAMPLE),
@@ -298,7 +364,12 @@ class WithdrawalConfirmView(APIView):
 
     @extend_schema(
         tags=[TAG], summary="Confirm withdrawal with OTP",
-        description="Confirms the emailed code, reserves the funds and queues the withdrawal for admin processing.",
+        description=(
+            "Confirms the emailed code, **reserves `total_usd` (amount + fee)** and queues the withdrawal for admin "
+            "processing. The response includes the updated `balances`: `pending_withdrawal_balance` increases and "
+            "`available_balance` decreases by `total_usd`, while `balance` is unchanged until an admin completes "
+            "the withdrawal. If it later fails, the full `total_usd` (fee included) is released."
+        ),
         request=ConfirmWithdrawalSerializer, parameters=[ID_PARAM],
         examples=[OpenApiExample("Valid request", value=docs.CONFIRM_REQUEST, request_only=True)],
         responses={
@@ -317,11 +388,12 @@ class WithdrawalConfirmView(APIView):
                  "message": "Too many incorrect codes. Please start a new withdrawal."},
                 {"code": "withdrawal_expired",
                  "message": "This withdrawal request has expired. Please start a new one."},
-                {"code": "insufficient_balance", "message": "Withdrawal amount exceeds your account balance.",
-                 "data": docs.BALANCES},
+                {"code": "insufficient_balance",
+                 "message": "Your balance is not enough to cover this withdrawal and its fee.",
+                 "data": docs.BALANCES_WITH_TOTAL},
                 {"code": "funds_in_use",
                  "message": "Part of your balance is in active trades or pending withdrawals and can't be withdrawn.",
-                 "data": docs.BALANCES},
+                 "data": docs.BALANCES_WITH_TOTAL},
             ),
             401: docs.UNAUTH, 404: docs.NOT_FOUND,
             409: docs.wallet_error(
@@ -347,7 +419,10 @@ class WithdrawalResendOTPView(APIView):
 
     @extend_schema(
         tags=[TAG], summary="Resend withdrawal OTP",
-        description="Issues a new code (the old one stops working) subject to a cooldown and a per-request resend limit.",
+        description=(
+            "Issues a new code (the old one stops working) subject to a cooldown and a per-request resend limit. "
+            "The rate, fee and amounts frozen on the withdrawal do not change."
+        ),
         request=None, parameters=[ID_PARAM],
         responses={
             200: success_response_doc(
@@ -387,7 +462,10 @@ class WithdrawalCancelView(APIView):
 
     @extend_schema(
         tags=[TAG], summary="Cancel withdrawal",
-        description="Cancels one of the caller's withdrawals that is still awaiting OTP confirmation.",
+        description=(
+            "Cancels one of the caller's withdrawals that is still awaiting OTP confirmation. Nothing was reserved "
+            "at that stage, so no fee is charged."
+        ),
         request=None, parameters=[ID_PARAM],
         responses={
             200: success_response_doc(
@@ -415,7 +493,13 @@ class TransactionListView(APIView):
 
     @extend_schema(
         tags=[TAG], summary="Ledger",
-        description="Paginated ledger of every balance movement, newest first, with optional type and date filters.",
+        description=(
+            "Paginated ledger of every balance movement, newest first, with optional type and date filters.\n\n"
+            "A completed withdrawal appears as **one** `withdrawal` entry whose `amount` is the **total deducted "
+            "(amount + fee)** and whose `description` shows the split, e.g. `Withdrawal WDR-AB12CD34 completed "
+            "(100.00 + 1.50 fee)`. The confirmation step appears as a `withdrawal_reserve` entry for the same "
+            "total, and a failed withdrawal as a `withdrawal_release` entry."
+        ),
         parameters=[
             OpenApiParameter("entry_type", str, enum=[e.value for e in EntryType], description="Filter by entry type."),
             OpenApiParameter("date_from", str, description="YYYY-MM-DD (inclusive)."),
@@ -471,3 +555,6 @@ class ExpirePendingWithdrawalsView(APIView):
     def post(self, request):
         count = services.expire_pending_withdrawals()
         return success_response({"expired_withdrawals": count}, message="Expired pending withdrawals.")
+
+
+# WalletSummaryView

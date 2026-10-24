@@ -1,0 +1,1 @@
+Update the email templates. emails.py now passes amount, asset, network_label, rate and usd_amount. In each deposit template, replace {{ deposit.usdt_amount }} USDT with {{ amount }} {{ asset }}. I haven’t seen the templates, so send them if you’d like me to update them.

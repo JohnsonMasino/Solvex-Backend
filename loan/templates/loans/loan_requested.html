@@ -1,0 +1,28 @@
+{% extends "core/email_base.html" %}
+
+{% block title %}Loan request received{% endblock %}
+
+{% block content %}
+<h2 style="margin:0 0 16px;font-size:20px;color:#111827;">Loan request received</h2>
+
+<p style="margin:0 0 12px;font-size:15px;line-height:1.6;color:#374151;">Hi {{ user.full_name|default:user.email }},</p>
+<p style="margin:0 0 16px;font-size:15px;line-height:1.6;color:#374151;">
+  We've received your loan request <strong>{{ loan.reference }}</strong> for <strong>${{ principal|floatformat:2 }}</strong>.
+  It is now waiting for approval. We'll email you as soon as a decision is made.
+</p>
+
+<table role="presentation" cellpadding="0" cellspacing="0" style="width:100%;margin:0 0 20px;font-size:15px;color:#374151;">
+  <tr><td style="padding:6px 0;color:#6b7280;width:180px;">Amount requested</td><td style="padding:6px 0;">${{ principal|floatformat:2 }}</td></tr>
+  <tr><td style="padding:6px 0;color:#6b7280;">Duration</td><td style="padding:6px 0;">{{ duration_label }}</td></tr>
+  <tr><td style="padding:6px 0;color:#6b7280;">Daily interest</td><td style="padding:6px 0;">{{ daily_rate }}% of the loan amount</td></tr>
+  <tr><td style="padding:6px 0;color:#6b7280;">Status</td><td style="padding:6px 0;"><strong>Pending approval</strong></td></tr>
+</table>
+
+<div style="margin:0 0 16px;padding:12px 16px;background:#f3f4f6;border-radius:6px;font-size:14px;line-height:1.6;color:#374151;">
+  Your repayment period of {{ duration_days }} days and interest only start once your loan is approved. Nothing is owed until then.
+</div>
+
+<p style="margin:0 0 24px;text-align:center;">
+  <a href="{{ loan_url }}" style="display:inline-block;background:#111827;color:#ffffff;text-decoration:none;padding:12px 28px;border-radius:6px;font-size:15px;font-weight:bold;">View my request</a>
+</p>
+{% endblock %}
