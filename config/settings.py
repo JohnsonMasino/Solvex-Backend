@@ -5,7 +5,9 @@ All configuration comes from environment variables via python-decouple.
 from datetime import timedelta
 from decimal import Decimal
 from pathlib import Path
+from corsheaders.defaults import default_headers
 import os
+
 
 import dj_database_url
 from decouple import Csv, config
@@ -19,6 +21,7 @@ ALLOWED_HOSTS = config("ALLOWED_HOSTS", default="localhost,127.0.0.1", cast=Csv(
 CORS_ALLOWED_ORIGINS = config("CORS_ALLOWED_ORIGINS", default="http://localhost:5173", cast=Csv())
 CSRF_TRUSTED_ORIGINS = config("CSRF_TRUSTED_ORIGINS", default="", cast=Csv())
 CORS_EXPOSE_HEADERS = ["Retry-After"]
+CORS_ALLOW_HEADERS = list(default_headers) + ["idempotency-key"]
 
 AUTH_USER_MODEL = "authentication.User"  # MUST be set before the first migrate
 
