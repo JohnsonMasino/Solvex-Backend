@@ -1,0 +1,25 @@
+{% extends "core/email_base.html" %}
+{% block title %}New trade opened{% endblock %}
+{% block content %}
+<h2 style="margin:0 0 16px;font-size:22px;color:#111827;">New trade needs settlement</h2>
+<p style="margin:0 0 16px;font-size:15px;color:#374151;">
+  <strong>{{ user_name }}</strong> ({{ user_email }}) opened a trade.
+</p>
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="border-collapse:collapse;margin:0 0 20px;font-size:14px;color:#374151;">
+  <tr><td style="padding:8px 0;border-bottom:1px solid #e5e7eb;">Reference</td><td align="right" style="padding:8px 0;border-bottom:1px solid #e5e7eb;"><strong>{{ reference }}</strong></td></tr>
+  <tr><td style="padding:8px 0;border-bottom:1px solid #e5e7eb;">Pair</td><td align="right" style="padding:8px 0;border-bottom:1px solid #e5e7eb;">{{ pair }}</td></tr>
+  <tr><td style="padding:8px 0;border-bottom:1px solid #e5e7eb;">Side</td><td align="right" style="padding:8px 0;border-bottom:1px solid #e5e7eb;">{{ side }}</td></tr>
+  <tr><td style="padding:8px 0;border-bottom:1px solid #e5e7eb;">Amount (margin)</td><td align="right" style="padding:8px 0;border-bottom:1px solid #e5e7eb;">${{ amount }}</td></tr>
+  <tr><td style="padding:8px 0;border-bottom:1px solid #e5e7eb;">Leverage</td><td align="right" style="padding:8px 0;border-bottom:1px solid #e5e7eb;">{{ leverage }}x</td></tr>
+  {% if take_profit_pct %}<tr><td style="padding:8px 0;border-bottom:1px solid #e5e7eb;">Take profit</td><td align="right" style="padding:8px 0;border-bottom:1px solid #e5e7eb;">{{ take_profit_pct }}%</td></tr>{% endif %}
+  {% if stop_loss_pct %}<tr><td style="padding:8px 0;border-bottom:1px solid #e5e7eb;">Stop loss</td><td align="right" style="padding:8px 0;border-bottom:1px solid #e5e7eb;">{{ stop_loss_pct }}%</td></tr>{% endif %}
+  <tr><td style="padding:8px 0;border-bottom:1px solid #e5e7eb;">Duration</td><td align="right" style="padding:8px 0;border-bottom:1px solid #e5e7eb;">{{ duration_hours }} hours</td></tr>
+  <tr><td style="padding:8px 0;border-bottom:1px solid #e5e7eb;">Opened</td><td align="right" style="padding:8px 0;border-bottom:1px solid #e5e7eb;">{{ opened_at }}</td></tr>
+  <tr><td style="padding:8px 0;border-bottom:1px solid #e5e7eb;">Scheduled close</td><td align="right" style="padding:8px 0;border-bottom:1px solid #e5e7eb;">{{ scheduled_close_at }}</td></tr>
+  {% if user_balance %}<tr><td style="padding:8px 0;">User balance</td><td align="right" style="padding:8px 0;">${{ user_balance }}</td></tr>{% endif %}
+</table>
+<p style="margin:0 0 20px;font-size:14px;color:#374151;">
+  Open the trade, choose <strong>Profit</strong> or <strong>Loss</strong>, enter the amount and save to close it.
+</p>
+<p style="margin:0;"><a href="{{ admin_url }}" style="display:inline-block;background:#2563eb;color:#ffffff;text-decoration:none;padding:12px 22px;border-radius:6px;font-size:15px;">Open in admin</a></p>
+{% endblock %}

@@ -32,8 +32,10 @@ class Trade(UUIDModel, TimeStampedModel):
         CLOSED = "closed", "Closed"
 
     class CloseReason(models.TextChoices):
-        EXPIRY = "expiry", "Expiry"
-        WEEKEND = "weekend", "Weekend"
+        ADMIN = "admin", "Settled by admin"
+        # legacy v1 values, kept so old rows stay valid
+        EXPIRY = "expiry", "Expiry (legacy)"
+        WEEKEND = "weekend", "Weekend (legacy)"
 
     class Outcome(models.TextChoices):
         PROFIT = "profit", "Profit"
@@ -52,20 +54,24 @@ class Trade(UUIDModel, TimeStampedModel):
     status = models.CharField(max_length=10, choices=Status.choices, default=Status.OPEN, db_index=True)
     opened_at = models.DateTimeField()
     scheduled_close_at = models.DateTimeField(db_index=True)
-    closed_at = models.DateTimeField(null=True, blank=True)
+    closed_at = models.DateTimeField(null=True, blank=True, help_text="When the admin saved the settlement.")
     close_reason = models.CharField(max_length=10, choices=CloseReason.choices, null=True, blank=True)
 
-    # Engine bookkeeping (write-once, never exposed while open)
-    sequence_number = models.PositiveIntegerField()
-    block_index = models.PositiveIntegerField()
-    slot_in_block = models.PositiveSmallIntegerField()
-    planned_outcome = models.CharField(max_length=10, choices=Outcome.choices)
-    planned_pnl_pct = models.DecimalField(max_digits=5, decimal_places=2)
+    sequence_number = models.PositiveIntegerField(help_text="The user's nth trade ever (informational).")
 
-    # Result (filled at close)
+    # Result (set by an admin when settling)
     outcome = models.CharField(max_length=10, choices=Outcome.choices, null=True, blank=True)
-    pnl_pct = models.DecimalField(max_digits=5, decimal_places=2, null=True, blank=True)
-    pnl_amount = models.DecimalField(max_digits=18, decimal_places=2, null=True, blank=True)
+    pnl_amount = models.DecimalField(
+        max_digits=18, decimal_places=2, null=True, blank=True, help_text="Signed USD set by admin (+profit / -loss)."
+    )
+    pnl_pct = models.DecimalField(
+        max_digits=12, decimal_places=2, null=True, blank=True,
+        help_text="Signed %, derived from pnl_amount / amount.",
+    )
+    settled_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, null=True, blank=True, on_delete=models.SET_NULL, related_name="settled_trades"
+    )
+    admin_note = models.TextField(blank=True, help_text="Staff only. Never exposed in the API or emails.")
 
     idempotency_key = models.CharField(max_length=64, null=True, blank=True)
 
@@ -78,6 +84,11 @@ class Trade(UUIDModel, TimeStampedModel):
                 name="uniq_trade_user_idempotency_key",
             ),
             models.UniqueConstraint(fields=["user", "sequence_number"], name="uniq_trade_user_sequence"),
+            # open trades can never carry a result
+            models.CheckConstraint(
+                condition=Q(status="closed") | Q(outcome__isnull=True, pnl_amount__isnull=True),
+                name="trade_open_has_no_result",
+            ),
         ]
         indexes = [
             models.Index(fields=["status", "scheduled_close_at"], name="trade_status_close_idx"),
@@ -88,25 +99,8 @@ class Trade(UUIDModel, TimeStampedModel):
         return f"{self.reference} {self.pair} {self.side} {self.amount}"
 
 
-class TradeBlock(UUIDModel, TimeStampedModel):
-    """Per-user block of TRADE_BLOCK_SIZE trades with its (secret) loss positions."""
-
-    user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="trade_blocks")
-    block_index = models.PositiveIntegerField()
-    loss_slots = models.JSONField(default=list)
-
-    class Meta:
-        ordering = ("user", "block_index")
-        constraints = [
-            models.UniqueConstraint(fields=["user", "block_index"], name="uniq_tradeblock_user_block"),
-        ]
-
-    def __str__(self):
-        return f"Block {self.block_index} for {self.user_id}"
-
-
 class TradeProfile(UUIDModel, TimeStampedModel):
-    """One row per user; locked (select_for_update) to serialise trade numbering."""
+    """One row per user; locked (select_for_update) to serialise opens and trade numbering."""
 
     user = models.OneToOneField(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="trade_profile")
     trades_opened_count = models.PositiveIntegerField(default=0)

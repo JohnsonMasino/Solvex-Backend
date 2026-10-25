@@ -15,6 +15,7 @@ from decouple import Csv, config
 BASE_DIR = Path(__file__).resolve().parent.parent
 
 # --------------------------------------------------------------------------- core
+DATABASE_URL = config("DATABASE_URL")
 SECRET_KEY = config("SECRET_KEY")
 DEBUG = config("DEBUG", default=False, cast=bool)
 ALLOWED_HOSTS = config("ALLOWED_HOSTS", default="localhost,127.0.0.1", cast=Csv())
@@ -86,7 +87,7 @@ DATABASES = {
     'default': dj_database_url.config(
         default=config('DATABASE_URL'),
         conn_max_age=0,
-        ssl_require=True,
+        ssl_require=not DATABASE_URL.startswith("sqlite"),
     )
 }
 
@@ -198,8 +199,6 @@ WITHDRAWAL_FEE_PERCENT = config("WITHDRAWAL_FEE_PERCENT", default="1.5", cast=De
 RATE_CACHE_SECONDS = 30
 RATE_MAX_STALE_SECONDS = 300
 RATE_PROVIDERS = ("coingecko", "cryptocompare", "coinbase", "kraken", "bitstamp")
-TRADE_SIM_MIN_MOVE_PCT = config("TRADE_SIM_MIN_MOVE_PCT", default="-2.0", cast=Decimal)
-TRADE_SIM_MAX_MOVE_PCT = config("TRADE_SIM_MAX_MOVE_PCT", default="3.0", cast=Decimal)
 TRADING_TIMEZONE = config("TRADING_TIMEZONE", default="UTC")
 PROFILE_LOCK_IDENTITY_AFTER_KYC = config("PROFILE_LOCK_IDENTITY_AFTER_KYC", default=True, cast=bool)
 
