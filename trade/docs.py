@@ -1,4 +1,4 @@
-"""Reusable OpenAPI examples for the trade app. No example ever shows planned_* fields."""
+"""Reusable OpenAPI examples for the trade app. No example shows admin_note, settled_by or any planned_* field."""
 from core.openapi import error_response_doc
 
 BALANCES = {"balance": "1250.00", "locked_balance": "300.00", "available_balance": "950.00"}
@@ -19,11 +19,24 @@ OPEN_TRADE = {
     "scheduled_close_at": "2026-10-22T20:30:00Z",
     "time_remaining_seconds": 21600,
     "progress_pct": 0.0,
+    "awaiting_settlement": False,
     "closed_at": None,
     "close_reason": None,
     "outcome": None,
     "pnl_pct": None,
     "pnl_amount": None,
+}
+
+# Time is up, waiting for staff to set the result.
+AWAITING_TRADE = {
+    **OPEN_TRADE,
+    "id": "3b7e5a42-91c4-4d0b-b8a3-6c0f2d4e1a77",
+    "reference": "TRD-KM45PQ12",
+    "pair": "ETH/USDT",
+    "side": "sell",
+    "time_remaining_seconds": 0,
+    "progress_pct": 100.0,
+    "awaiting_settlement": True,
 }
 
 CLOSED_TRADE = {
@@ -33,11 +46,13 @@ CLOSED_TRADE = {
     "pair": "EUR/USD",
     "market_type": "forex",
     "side": "sell",
+    "amount": "300.00",
     "status": "closed",
     "time_remaining_seconds": 0,
     "progress_pct": 100.0,
-    "closed_at": "2026-10-22T20:30:02Z",
-    "close_reason": "expiry",
+    "awaiting_settlement": False,
+    "closed_at": "2026-10-22T21:05:10Z",
+    "close_reason": "admin",
     "outcome": "profit",
     "pnl_pct": "0.80",
     "pnl_amount": "2.40",

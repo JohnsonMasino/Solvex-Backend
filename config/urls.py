@@ -28,7 +28,6 @@ urlpatterns = [
     # Cron (each app owns its cron_urls.py)
     path("api/cron/auth/", include("authentication.cron_urls")),
     path("api/cron/wallet/", include("wallet.cron_urls")),
-    path("api/cron/trades/", include("trade.cron_urls")),
     path("api/cron/loans/", include("loan.cron_urls")),
 
     # Docs

@@ -1,15 +1,14 @@
 """
-trade/services.py — all business logic for the trade app.
+trade/services.py — all business logic for the trade app (v2: manual admin settlement).
 
 No function here is consumed by other apps (00 §8). Cross-app imports
 (wallet, referral) are lazy and go through their service contracts only.
 """
 import logging
-import random
 import re
 import uuid
 from datetime import timedelta
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from functools import lru_cache
 from zoneinfo import ZoneInfo
 
@@ -22,13 +21,15 @@ from django.utils import timezone
 from core.exceptions import BusinessError
 from core.utils import is_weekend, money
 
-from .models import DURATION_CHOICES, Trade, TradeBlock, TradeProfile
+from .models import DURATION_CHOICES, Trade, TradeProfile
 
 logger = logging.getLogger(__name__)
 
 METAL_CODES = {"XAU", "XAG"}
 _PAIR_SPLIT = re.compile(r"[/\-_]")
 _PAIR_SIDE = re.compile(r"^[A-Z0-9]{2,10}$")
+
+MAX_PROFIT = Decimal("1000000.00")
 
 LIMIT_MSG_STANDARD = (
     "You have reached the maximum number of open trades for your account balance. "
@@ -65,7 +66,10 @@ def get_next_open_at(now=None):
 
 
 def get_next_close_at(now=None):
-    """Next Saturday 00:00 (TRADING_TIMEZONE) or None when it is already the weekend."""
+    """
+    Next Saturday 00:00 (TRADING_TIMEZONE), i.e. when NEW trading is next blocked,
+    or None when it is already the weekend. Open trades are NOT auto-closed then.
+    """
     local = (now or timezone.now()).astimezone(_trading_tz())
     if local.weekday() >= 5:
         return None
@@ -154,7 +158,7 @@ def get_user_limits(user):
     return open_count, get_max_open_trades(balances["balance"]), balances
 
 
-# --------------------------------------------------------------------------- engine
+# --------------------------------------------------------------------------- opening
 def _unique_reference() -> str:
     from .models import generate_trade_reference
 
@@ -164,24 +168,9 @@ def _unique_reference() -> str:
             return ref
 
 
-def _random_pnl_pct(rng: random.SystemRandom) -> Decimal:
-    lo = int((Decimal(settings.TRADE_PNL_MIN_PCT) * 10).to_integral_value())
-    hi = int((Decimal(settings.TRADE_PNL_MAX_PCT) * 10).to_integral_value())
-    return (Decimal(rng.randint(lo, hi)) / Decimal(10)).quantize(Decimal("0.01"))
+def _queue_opened_emails(user, trade):
+    """on_commit: user confirmation + staff notification. Neither can ever fail the request."""
 
-
-def _get_or_create_block(user, block_index: int, rng: random.SystemRandom) -> TradeBlock:
-    size = settings.TRADE_BLOCK_SIZE
-    losses = min(settings.TRADE_LOSSES_PER_BLOCK, size)
-    block, _ = TradeBlock.objects.get_or_create(
-        user=user,
-        block_index=block_index,
-        defaults={"loss_slots": sorted(rng.sample(range(1, size + 1), losses))},
-    )
-    return block
-
-
-def _queue_opened_email(user, trade):
     def _send():
         try:
             from .emails import send_trade_opened_email
@@ -189,6 +178,12 @@ def _queue_opened_email(user, trade):
             send_trade_opened_email(user, trade)
         except Exception:
             logger.exception("trade: opened email failed for %s", trade.id)
+        try:
+            from .emails import send_admin_new_trade_email
+
+            send_admin_new_trade_email(trade)
+        except Exception:
+            logger.exception("trade: admin notification email failed for %s", trade.id)
 
     transaction.on_commit(_send)
 
@@ -197,11 +192,12 @@ def open_trade(user, data, idempotency_key=None) -> tuple[Trade, bool]:
     """
     Open a trade. Returns (trade, created). created=False means an idempotent replay.
     Everything runs in one transaction; any exception rolls back funds + counter + trade.
+    The result of the trade is decided later by an admin (settle_trade_by_admin).
     """
     from wallet import services as wallet_services
 
     with transaction.atomic():
-        # Lock the user's trade profile first: serialises numbering, limit checks and idempotency.
+        # (3) Lock the user's trade profile first: serialises numbering, limit checks and idempotency.
         profile, _ = TradeProfile.objects.get_or_create(user=user)
         profile = TradeProfile.objects.select_for_update().get(pk=profile.pk)
 
@@ -211,7 +207,7 @@ def open_trade(user, data, idempotency_key=None) -> tuple[Trade, bool]:
             if existing is not None:
                 return existing, False
 
-        # (2) weekend
+        # (2) weekend (only blocks OPENING)
         if is_weekend():
             raise BusinessError(
                 "market_closed",
@@ -257,17 +253,10 @@ def open_trade(user, data, idempotency_key=None) -> tuple[Trade, bool]:
                 data=balances_payload(wallet_services.get_balances(user), full=True),
             )
 
-        # (7) sequence / block / plan
-        rng = random.SystemRandom()
+        # (7) sequence number
         n = profile.trades_opened_count + 1
-        size = settings.TRADE_BLOCK_SIZE
-        block_index = (n - 1) // size
-        slot = (n - 1) % size + 1
-        block = _get_or_create_block(user, block_index, rng)
-        planned_outcome = Trade.Outcome.LOSS if slot in block.loss_slots else Trade.Outcome.PROFIT
-        planned_pct = _random_pnl_pct(rng)
 
-        # (8) create trade
+        # (8) create trade (open, no result)
         now = timezone.now()
         duration = int(data["duration_hours"])
         trade = Trade.objects.create(
@@ -286,10 +275,6 @@ def open_trade(user, data, idempotency_key=None) -> tuple[Trade, bool]:
             opened_at=now,
             scheduled_close_at=now + timedelta(hours=duration),
             sequence_number=n,
-            block_index=block_index,
-            slot_in_block=slot,
-            planned_outcome=planned_outcome,
-            planned_pnl_pct=planned_pct,
             idempotency_key=idempotency_key or None,
         )
 
@@ -297,11 +282,12 @@ def open_trade(user, data, idempotency_key=None) -> tuple[Trade, bool]:
         profile.trades_opened_count = n
         profile.save(update_fields=["trades_opened_count", "updated_at"])
 
-        # (10) email after commit
-        _queue_opened_email(user, trade)
+        # (10) emails after commit (user + admin)
+        _queue_opened_emails(user, trade)
         return trade, True
 
 
+# --------------------------------------------------------------------------- settlement
 def _after_close(user, trade):
     """Runs on_commit: closed email, then referral hook. Never raises."""
     try:
@@ -318,25 +304,34 @@ def _after_close(user, trade):
         logger.exception("trade: referral hook failed for user %s", user.pk)
 
 
-def close_trade(trade_id, reason, skip_locked: bool = False):
+def close_trade(trade_id, outcome, pnl_amount, reason=Trade.CloseReason.ADMIN, admin_user=None, note=""):
     """
-    Close one trade, settle wallet. Idempotent: returns None if the trade is missing,
-    already closed, or (with skip_locked) currently locked by another worker.
+    Apply a result to ONE open trade and settle the wallet.
+
+    `pnl_amount` is signed USD (+profit / -loss). Idempotent: returns None if the trade is
+    missing or no longer open (nothing is changed, nobody is paid twice).
     """
     from wallet import services as wallet_services
 
+    if outcome not in (Trade.Outcome.PROFIT, Trade.Outcome.LOSS):
+        raise BusinessError("validation_error", "Choose profit or loss.", errors={"outcome": ["Choose profit or loss."]})
+    pnl_amount = money(pnl_amount)
+    if (outcome == Trade.Outcome.PROFIT and pnl_amount <= 0) or (outcome == Trade.Outcome.LOSS and pnl_amount >= 0):
+        raise BusinessError(
+            "validation_error", "Amount sign does not match the chosen result.", errors={"amount": ["Invalid amount."]}
+        )
+
     with transaction.atomic():
-        trade = Trade.objects.select_for_update(skip_locked=skip_locked).filter(pk=trade_id).first()
+        trade = Trade.objects.select_for_update().filter(pk=trade_id).first()
         if trade is None or trade.status != Trade.Status.OPEN:
             return None
 
-        magnitude = money(trade.amount * trade.planned_pnl_pct / Decimal(100))
-        if trade.planned_outcome == Trade.Outcome.LOSS:
-            pnl_amount = max(-magnitude, -trade.amount)  # floor at -amount
-            pnl_pct = -trade.planned_pnl_pct
-        else:
-            pnl_amount = magnitude
-            pnl_pct = trade.planned_pnl_pct
+        if outcome == Trade.Outcome.LOSS and abs(pnl_amount) > trade.amount:
+            raise BusinessError(
+                "loss_exceeds_amount",
+                f"A loss cannot be larger than the trade amount (USD {trade.amount}).",
+                status=400,
+            )
 
         user = trade.user
         wallet_services.settle_trade(user, principal=trade.amount, pnl=pnl_amount, reference=f"trade:{trade.id}")
@@ -344,40 +339,47 @@ def close_trade(trade_id, reason, skip_locked: bool = False):
         trade.status = Trade.Status.CLOSED
         trade.closed_at = timezone.now()
         trade.close_reason = reason
-        trade.outcome = trade.planned_outcome
-        trade.pnl_pct = pnl_pct
+        trade.outcome = outcome
         trade.pnl_amount = pnl_amount
+        trade.pnl_pct = money(pnl_amount / trade.amount * Decimal(100))
+        trade.settled_by = admin_user
+        trade.admin_note = (note or "").strip()
         trade.save(
-            update_fields=["status", "closed_at", "close_reason", "outcome", "pnl_pct", "pnl_amount", "updated_at"]
+            update_fields=[
+                "status", "closed_at", "close_reason", "outcome", "pnl_amount", "pnl_pct",
+                "settled_by", "admin_note", "updated_at",
+            ]
         )
         transaction.on_commit(lambda: _after_close(user, trade))
         return trade
 
 
-def _close_batch(base_qs, reason: str, limit: int) -> dict:
-    ids = list(base_qs.order_by("scheduled_close_at").values_list("id", flat=True)[:limit])
-    closed = failed = 0
-    for trade_id in ids:
-        try:
-            if close_trade(trade_id, reason, skip_locked=True) is not None:
-                closed += 1
-        except Exception:
-            failed += 1
-            logger.exception("trade: failed to close trade %s (%s)", trade_id, reason)
-    return {"closed": closed, "failed": failed, "remaining": base_qs.count()}
+def settle_trade_by_admin(trade_id, admin_user, outcome, amount, note=""):
+    """
+    Called from Django admin. `amount` is a POSITIVE USD size; the sign comes from `outcome`.
+    Raises BusinessError on invalid input. Returns the closed Trade, or None if already closed.
+    """
+    if outcome not in (Trade.Outcome.PROFIT, Trade.Outcome.LOSS):
+        raise BusinessError("validation_error", "Choose profit or loss.", errors={"outcome": ["Choose profit or loss."]})
+    try:
+        amount = money(amount)
+    except (InvalidOperation, ValueError, TypeError):
+        raise BusinessError(
+            "validation_error", "Enter a positive amount with at most 2 decimal places.",
+            errors={"amount": ["Enter a positive amount with at most 2 decimal places."]},
+        )
+    if amount <= 0:
+        raise BusinessError(
+            "validation_error", "Enter a positive amount with at most 2 decimal places.",
+            errors={"amount": ["Enter a positive amount with at most 2 decimal places."]},
+        )
+    if outcome == Trade.Outcome.PROFIT and amount > MAX_PROFIT:
+        raise BusinessError("profit_too_large", "Profit is above the allowed maximum.")
 
-
-def close_expired_trades(limit: int = 100) -> dict:
-    qs = Trade.objects.filter(status=Trade.Status.OPEN, scheduled_close_at__lte=timezone.now())
-    return _close_batch(qs, Trade.CloseReason.EXPIRY, limit)
-
-
-def close_weekend_trades(limit: int = 100) -> dict:
-    if not is_weekend():
-        return {"weekend": False, "closed": 0}
-    qs = Trade.objects.filter(status=Trade.Status.OPEN)
-    result = _close_batch(qs, Trade.CloseReason.WEEKEND, limit)
-    return {"weekend": True, **result}
+    pnl_amount = amount if outcome == Trade.Outcome.PROFIT else -amount
+    return close_trade(
+        trade_id, outcome, pnl_amount, reason=Trade.CloseReason.ADMIN, admin_user=admin_user, note=note
+    )
 
 
 # --------------------------------------------------------------------------- summary

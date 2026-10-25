@@ -8,7 +8,7 @@ from rest_framework.views import APIView
 
 from core.openapi import error_response_doc, success_response_doc
 from core.pagination import StandardPagination
-from core.permissions import HasCronSecret, IsKYCApproved
+from core.permissions import IsKYCApproved
 from core.responses import success_response
 
 from . import docs
@@ -16,8 +16,6 @@ from .models import Trade
 from .serializers import OpenTradeSerializer, TradeFilterSerializer, TradeSerializer
 from .services import (
     balances_payload,
-    close_expired_trades,
-    close_weekend_trades,
     get_trading_config,
     get_user_limits,
     get_user_summary,
@@ -31,8 +29,7 @@ def _trade_data(trade, user):
     """Serialized trade plus current wallet balances (used by the open endpoint)."""
     from wallet import services as wallet_services
 
-    data = TradeSerializer(trade).data
-    data = dict(data)
+    data = dict(TradeSerializer(trade).data)
     data["balances"] = balances_payload(wallet_services.get_balances(user))
     return data
 
@@ -42,7 +39,10 @@ class TradingConfigView(APIView):
     @extend_schema(
         tags=[TAG],
         summary="Trading rules & market status",
-        description="Returns market open/closed state, trade limits, allowed durations and open-trade limits by balance.",
+        description=(
+            "Returns market open/closed state, trade limits, allowed durations and open-trade limits by balance. "
+            "next_close_at is when NEW trading is next blocked (weekend start); open trades are not auto-closed then."
+        ),
         responses={
             200: success_response_doc(
                 "TradeConfigSuccess",
@@ -73,7 +73,7 @@ class TradeSummaryView(APIView):
     @extend_schema(
         tags=[TAG],
         summary="My trading summary",
-        description="Open-trade usage, wallet buckets and win/loss totals. wins/losses/total_pnl count closed trades only.",
+        description="Open-trade usage, wallet buckets and win/loss totals. wins/losses/total_pnl count settled (closed) trades only.",
         responses={
             200: success_response_doc(
                 "TradeSummarySuccess",
@@ -99,19 +99,25 @@ class ActiveTradesView(APIView):
     @extend_schema(
         tags=[TAG],
         summary="My open trades",
-        description="All currently open trades (not paginated, max 10), soonest closing first. Outcome is never shown while open.",
+        description=(
+            "All currently open trades (not paginated, max 10), soonest closing first. Trades are settled manually "
+            "by staff: outcome, pnl_pct and pnl_amount stay null until then. awaiting_settlement is true when the "
+            "trade's time is up and the result is pending."
+        ),
         responses={
             200: success_response_doc(
                 "ActiveTradesSuccess",
                 "Open trades.",
-                example=docs.envelope({"count": 1, "max_open_trades": 2, "results": [docs.OPEN_TRADE]}),
+                example=docs.envelope(
+                    {"count": 2, "max_open_trades": 2, "results": [docs.AWAITING_TRADE, docs.OPEN_TRADE]}
+                ),
             ),
             401: docs.err_unauthenticated(),
             429: docs.err_throttled(),
         },
     )
     def get(self, request):
-        open_count, max_open, _ = get_user_limits(request.user)
+        _, max_open, _ = get_user_limits(request.user)
         qs = Trade.objects.filter(user=request.user, status=Trade.Status.OPEN).order_by("scheduled_close_at")
         results = TradeSerializer(qs, many=True).data
         return success_response(
@@ -143,7 +149,10 @@ class TradeListCreateView(APIView):
     @extend_schema(
         tags=[TAG],
         summary="Trade history",
-        description="Paginated list of the current user's trades with optional filters. Closed trades include outcome and P/L.",
+        description=(
+            "Paginated list of the current user's trades with optional filters. Trades are settled manually by "
+            "staff; settled trades include outcome and P/L, open trades have them null."
+        ),
         parameters=_FILTER_PARAMS,
         responses={
             200: success_response_doc(
@@ -191,8 +200,9 @@ class TradeListCreateView(APIView):
         tags=[TAG],
         summary="Open a trade",
         description=(
-            "Opens a trade for a Tier 2 (KYC-approved) user and locks the margin. Optional Idempotency-Key header "
-            "replays the original trade with 200. TP/SL and leverage are informational only."
+            "Opens a trade for a Tier 2 (KYC-approved) user and locks the margin. Staff are notified and settle the "
+            "result manually. Optional Idempotency-Key header replays the original trade with 200. "
+            "TP/SL and leverage are informational only."
         ),
         request=OpenTradeSerializer,
         parameters=[
@@ -250,7 +260,7 @@ class TradeDetailView(APIView):
     @extend_schema(
         tags=[TAG],
         summary="Trade detail",
-        description="One of the current user's trades. Other users' trades return 404. Outcome fields stay null while open.",
+        description="One of the current user's trades. Other users' trades return 404. Outcome fields stay null until staff settle the trade.",
         parameters=[OpenApiParameter("trade_id", OpenApiTypes.UUID, OpenApiParameter.PATH)],
         responses={
             200: success_response_doc("TradeDetailSuccess", "Trade detail.", example=docs.envelope(docs.CLOSED_TRADE)),
@@ -268,61 +278,3 @@ class TradeDetailView(APIView):
         if trade is None:
             raise NotFound()
         return success_response(TradeSerializer(trade).data, "Trade retrieved.")
-
-
-# --------------------------------------------------------------------------- cron
-_CRON_HEADER = OpenApiParameter(
-    "X-Cron-Secret", OpenApiTypes.STR, OpenApiParameter.HEADER, required=True,
-    description="Shared secret (CRON_SECRET_KEY).",
-)
-_CRON_403 = error_response_doc(
-    "Wrong or missing cron secret.", code="invalid_cron_secret", message="Invalid or missing cron secret."
-)
-
-
-class CronBaseView(APIView):
-    authentication_classes = []
-    permission_classes = [HasCronSecret]
-    throttle_classes = []
-
-
-class CloseExpiredTradesView(CronBaseView):
-    @extend_schema(
-        tags=["Cron"],
-        summary="Close expired trades",
-        description="Closes open trades whose scheduled close time has passed (max 100 per run, idempotent). Run every minute.",
-        auth=[],
-        parameters=[_CRON_HEADER],
-        request=None,
-        responses={
-            200: success_response_doc(
-                "CronCloseExpiredSuccess",
-                "Batch summary.",
-                example=docs.envelope({"closed": 5, "failed": 0, "remaining": 0}, "Expired trades processed."),
-            ),
-            403: _CRON_403,
-        },
-    )
-    def post(self, request):
-        return success_response(close_expired_trades(), "Expired trades processed.")
-
-
-class CloseWeekendTradesView(CronBaseView):
-    @extend_schema(
-        tags=["Cron"],
-        summary="Close all trades at weekend",
-        description="If it is the weekend, closes ALL open trades (max 100 per run, idempotent). Run every 5 minutes.",
-        auth=[],
-        parameters=[_CRON_HEADER],
-        request=None,
-        responses={
-            200: success_response_doc(
-                "CronCloseWeekendSuccess",
-                "Batch summary.",
-                example=docs.envelope({"weekend": True, "closed": 12, "failed": 0, "remaining": 0}, "Weekend trades processed."),
-            ),
-            403: _CRON_403,
-        },
-    )
-    def post(self, request):
-        return success_response(close_weekend_trades(), "Weekend trades processed.")

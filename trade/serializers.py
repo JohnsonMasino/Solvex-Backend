@@ -66,12 +66,13 @@ class OpenTradeSerializer(serializers.Serializer):
 
 class TradeSerializer(serializers.ModelSerializer):
     """
-    Public trade representation. Fields are an explicit allow-list:
-    planned_outcome / planned_pnl_pct / sequence / block / slot are NEVER included.
+    Public trade representation. Explicit allow-list: admin_note, settled_by and
+    sequence_number are NEVER included. outcome / pnl_* are null until staff settle the trade.
     """
 
     time_remaining_seconds = serializers.SerializerMethodField()
     progress_pct = serializers.SerializerMethodField()
+    awaiting_settlement = serializers.SerializerMethodField()
 
     class Meta:
         model = Trade
@@ -79,6 +80,7 @@ class TradeSerializer(serializers.ModelSerializer):
             "id", "reference", "pair", "market_type", "side", "amount", "leverage",
             "take_profit_pct", "stop_loss_pct", "duration_hours", "status",
             "opened_at", "scheduled_close_at", "time_remaining_seconds", "progress_pct",
+            "awaiting_settlement",
             "closed_at", "close_reason", "outcome", "pnl_pct", "pnl_amount",
         )
         read_only_fields = fields
@@ -98,6 +100,11 @@ class TradeSerializer(serializers.ModelSerializer):
             return 100.0
         elapsed = (timezone.now() - obj.opened_at).total_seconds()
         return round(min(100.0, max(0.0, elapsed / total * 100)), 2)
+
+    @extend_schema_field(OpenApiTypes.BOOL)
+    def get_awaiting_settlement(self, obj):
+        """True when the trade's time is up but staff have not settled it yet."""
+        return obj.status == Trade.Status.OPEN and obj.scheduled_close_at <= timezone.now()
 
 
 class TradeFilterSerializer(serializers.Serializer):

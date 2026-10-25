@@ -1,20 +1,22 @@
 {% extends "core/email_base.html" %}
-{% block title %}Your trade has closed{% endblock %}
+{% block title %}Your trade has been settled{% endblock %}
 {% block content %}
-<h2 style="margin:0 0 16px;font-size:22px;color:#111827;">Trade closed</h2>
+<h2 style="margin:0 0 16px;font-size:22px;color:#111827;">Your trade has been settled</h2>
 <p style="margin:0 0 16px;font-size:15px;color:#374151;">Hi {{ user_name }},</p>
 <p style="margin:0 0 16px;font-size:15px;color:#374151;">
-  Your <strong>{{ side }}</strong> trade on <strong>{{ pair }}</strong> ({{ reference }}) has closed. Reason: {{ close_reason_label }}.
+  Your <strong>{{ side }}</strong> trade on <strong>{{ pair }}</strong> ({{ reference }}) has been settled with a
+  <strong style="color:{% if is_profit %}#059669{% else %}#dc2626{% endif %};">{{ outcome_label|lower }}</strong>.
 </p>
-<div style="margin:0 0 20px;padding:16px;border-radius:8px;text-align:center;background:{% if is_profit %}#ecfdf5{% else %}#fef2f2{% endif %};">
-  <div style="font-size:13px;color:#6b7280;text-transform:uppercase;letter-spacing:1px;">{{ outcome_label }}</div>
-  <div style="font-size:28px;font-weight:bold;color:{% if is_profit %}#059669{% else %}#dc2626{% endif %};">{{ pnl_amount }}</div>
-  <div style="font-size:14px;color:{% if is_profit %}#059669{% else %}#dc2626{% endif %};">{{ pnl_pct }}</div>
-</div>
 <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="border-collapse:collapse;margin:0 0 20px;font-size:14px;color:#374151;">
+  <tr><td style="padding:8px 0;border-bottom:1px solid #e5e7eb;">Reference</td><td align="right" style="padding:8px 0;border-bottom:1px solid #e5e7eb;"><strong>{{ reference }}</strong></td></tr>
   <tr><td style="padding:8px 0;border-bottom:1px solid #e5e7eb;">Amount (margin)</td><td align="right" style="padding:8px 0;border-bottom:1px solid #e5e7eb;">${{ amount }}</td></tr>
-  <tr><td style="padding:8px 0;border-bottom:1px solid #e5e7eb;">Closed</td><td align="right" style="padding:8px 0;border-bottom:1px solid #e5e7eb;">{{ closed_at }}</td></tr>
+  <tr><td style="padding:8px 0;border-bottom:1px solid #e5e7eb;">Result</td><td align="right" style="padding:8px 0;border-bottom:1px solid #e5e7eb;"><strong>{{ outcome_label }}</strong></td></tr>
+  <tr><td style="padding:8px 0;border-bottom:1px solid #e5e7eb;">Profit / Loss</td><td align="right" style="padding:8px 0;border-bottom:1px solid #e5e7eb;"><strong style="color:{% if is_profit %}#059669{% else %}#dc2626{% endif %};">{{ pnl_amount }}</strong> ({{ pnl_pct }})</td></tr>
+  <tr><td style="padding:8px 0;border-bottom:1px solid #e5e7eb;">Settled</td><td align="right" style="padding:8px 0;border-bottom:1px solid #e5e7eb;">{{ closed_at }}</td></tr>
   {% if new_balance %}<tr><td style="padding:8px 0;">New balance</td><td align="right" style="padding:8px 0;"><strong>${{ new_balance }}</strong></td></tr>{% endif %}
 </table>
-<p style="margin:0;"><a href="{{ FRONTEND_URL }}" style="display:inline-block;background:#2563eb;color:#ffffff;text-decoration:none;padding:12px 22px;border-radius:6px;font-size:15px;">View my wallet</a></p>
+<p style="margin:0 0 20px;font-size:14px;color:#374151;">
+  Your margin has been released and the result has been applied to your account balance.
+</p>
+<p style="margin:0;"><a href="{{ FRONTEND_URL }}" style="display:inline-block;background:#2563eb;color:#ffffff;text-decoration:none;padding:12px 22px;border-radius:6px;font-size:15px;">View my trades</a></p>
 {% endblock %}
