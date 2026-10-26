@@ -1,3 +1,5 @@
+# views.py
+
 import uuid
 
 from drf_spectacular.types import OpenApiTypes
