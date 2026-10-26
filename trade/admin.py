@@ -4,7 +4,7 @@ from django import forms
 from django.contrib import admin, messages
 from django.core.exceptions import ValidationError
 from django.utils import timezone
-from django.utils.html import format_html
+from django.utils.safestring import mark_safe
 
 from core.exceptions import BusinessError
 
@@ -152,7 +152,8 @@ class TradeAdmin(admin.ModelAdmin):
     @admin.display(description="Awaiting settlement")
     def awaiting_settlement_display(self, obj):
         if obj.status == Trade.Status.OPEN and obj.scheduled_close_at <= timezone.now():
-            return format_html('<span style="color:#dc2626;font-weight:700;">OVERDUE</span>')
+            # Static HTML with nothing to interpolate: use mark_safe (format_html needs args in Django 5+).
+            return mark_safe('<span style="color:#dc2626;font-weight:700;">OVERDUE</span>')
         if obj.status == Trade.Status.OPEN:
             return "Running"
         return "—"
