@@ -9,6 +9,7 @@ wallet/services.py - ALL wallet business logic + the public cross-app contract (
     settle_trade(user, principal, pnl, reference) -> None
     complete_deposit / decline_deposit / complete_withdrawal / fail_withdrawal   (admin only)
     admin_update_deposit / admin_update_withdrawal                                (admin only)
+    admin_create_deposit / admin_create_withdrawal                                (admin only)
 
 Deposits accept USDT (BEP20 / ERC20 / TRC20), BTC (btc) and ETH (eth). Each network maps to
 one asset; the USD credit is frozen at creation as amount x the LIVE market rate fetched at
@@ -28,8 +29,19 @@ top of the amount the user asked to receive:
                                           released in full (fee included) if it fails
     usdt_amount  usd_amount / live USDT rate -> exact USDT the admin sends
 
-Admins can edit a deposit (while pending) or a withdrawal (while pending, i.e. after OTP) before
-approving it. Whatever is saved at approval time is what the ledger and the user's history show.
+ADMIN EDITS (any status)
+    Admins can edit a deposit or withdrawal in ANY status.
+      * pending deposit / pending withdrawal : as before (withdrawal reservation is adjusted).
+      * completed deposit / completed withdrawal : the wallet balance is moved by the difference,
+        the ORIGINAL ledger row is rewritten in place (amount, description, date) so the user's
+        transaction history shows the new details, and the running balance_after column is
+        recalculated.
+      * declined / cancelled / failed / expired / awaiting_otp : only the record changes
+        (no money is involved).
+
+ADMIN MANUAL TRANSACTIONS
+    admin_create_deposit    -> creates a deposit for a user (optionally credits the balance now)
+    admin_create_withdrawal -> creates a withdrawal for a user (reserves funds, optionally completes it)
 
 Locking order everywhere: wallet row first, then the deposit/withdrawal row.
 """
@@ -166,6 +178,77 @@ def _set_ledger_time(entry, when):
     Uses a queryset update because ledger rows are append-only through save()."""
     if when is not None:
         WalletTransaction.objects.filter(pk=entry.pk).update(created_at=when)
+
+
+# --------------------------------------------------------------------------- #
+# Ledger correction helpers (used ONLY when an admin edits an already-completed transaction)
+# --------------------------------------------------------------------------- #
+def _shift_balance(wallet, delta) -> None:
+    """Move wallet.balance by `delta` WITHOUT writing a ledger row (the caller rewrites the
+    original ledger row instead). Must be called with the wallet locked."""
+    delta = money(delta)
+    if delta == 0:
+        return
+    new_balance = money(wallet.balance + delta)
+    if new_balance < 0 or new_balance < wallet.locked_balance + wallet.pending_withdrawal_balance:
+        raise InsufficientFunds(
+            "This change would take the user's balance below the funds that are currently locked in "
+            "trades or reserved for pending withdrawals.",
+            data=balance_strings(wallet),
+        )
+    wallet.balance = new_balance
+    wallet.save(update_fields=["balance", "updated_at"])
+
+
+def _rewrite_ledger_entry(entry, *, amount, balance_delta, description, when=None) -> None:
+    """Rewrite the visible details of an existing ledger row in place (queryset update, because
+    ledger rows are append-only through save())."""
+    values = {
+        "amount": money(amount),
+        "balance_delta": money(balance_delta),
+        "description": (description or "")[:255],
+    }
+    if when is not None:
+        values["created_at"] = when
+    WalletTransaction.objects.filter(pk=entry.pk).update(**values)
+
+
+def _rechain_ledger(wallet) -> None:
+    """Recalculate balance_after / locked_after / pending_after for every ledger row of a wallet,
+    in chronological order, from the stored deltas.
+
+    Safety: the recalculated final totals must equal the wallet's real balances. If they do not
+    (e.g. some other app changed the wallet without a ledger row) nothing is rewritten.
+    """
+    rows = list(WalletTransaction.objects.filter(wallet=wallet).order_by("created_at", "pk"))
+    balance = locked = pending = ZERO
+    chain = []
+    for row in rows:
+        balance = money(balance + row.balance_delta)
+        locked = money(locked + row.locked_delta)
+        pending = money(pending + row.pending_delta)
+        chain.append((row, balance, locked, pending))
+
+    if (balance, locked, pending) != (
+        money(wallet.balance), money(wallet.locked_balance), money(wallet.pending_withdrawal_balance)
+    ):
+        logger.warning(
+            "Ledger re-chain skipped for wallet %s: ledger totals (%s/%s/%s) do not match wallet (%s/%s/%s).",
+            wallet.pk, balance, locked, pending,
+            wallet.balance, wallet.locked_balance, wallet.pending_withdrawal_balance,
+        )
+        return
+
+    changed = []
+    for row, bal, loc, pen in chain:
+        if (row.balance_after, row.locked_after, row.pending_after) != (bal, loc, pen):
+            row.balance_after, row.locked_after, row.pending_after = bal, loc, pen
+            changed.append(row)
+    if changed:
+        # bulk_update bypasses save(), which is blocked for append-only ledger rows.
+        WalletTransaction.objects.bulk_update(
+            changed, ["balance_after", "locked_after", "pending_after"], batch_size=500
+        )
 
 
 # --------------------------------------------------------------------------- #
@@ -404,8 +487,12 @@ def cancel_deposit(user, deposit_id) -> Deposit:
 # --------------------------------------------------------------------------- #
 # Deposits (admin side)
 # --------------------------------------------------------------------------- #
+def _deposit_ledger_description(d) -> str:
+    return f"Deposit {d.reference} ({_fmt_amount(d.amount)} {str(d.asset).upper()})"
+
+
 def admin_update_deposit(deposit, changes: dict) -> Deposit:
-    """Apply admin edits to a PENDING deposit before it is approved.
+    """Apply admin edits to a deposit in ANY status.
 
     `changes` holds ONLY the fields the admin actually changed, any of:
         network, amount, rate, usd_amount, deposit_address, tx_hash, transaction_at
@@ -417,12 +504,19 @@ def admin_update_deposit(deposit, changes: dict) -> Deposit:
       * usd_amount: an edited usd_amount wins; otherwise amount x rate.
       * deposit_address: an edited address wins; otherwise, if the network changed, the company address
         currently configured for the new network is used.
+
+    Money effects by status:
+      * pending                          -> nothing moves; the new values are used when it is approved.
+      * completed                        -> the wallet balance moves by (new usd_amount - old usd_amount),
+                                            the original ledger row is rewritten with the new details and
+                                            the running balances are recalculated.
+      * declined / cancelled             -> only the record changes.
     """
     with transaction.atomic():
-        _locked_wallet(deposit.user)
+        wallet = _locked_wallet(deposit.user)
         d = Deposit.objects.select_for_update().get(pk=deposit.pk)
-        if d.status != DepositStatus.PENDING:
-            raise _conflict(d.status, "Only pending deposits can be edited.")
+        status = d.status
+        old_usd = d.usd_amount
 
         network = Network(changes.get("network", d.network))
         asset = NETWORK_ASSET[network]
@@ -463,6 +557,8 @@ def admin_update_deposit(deposit, changes: dict) -> Deposit:
                     "tx_hash_already_used", "This transaction hash has already been submitted.", status=409
                 )
 
+        # ---- wallet + ledger (completed deposits only; checked BEFORE the deposit row is saved)
+        delta = money(usd_amount - old_usd)
         d.network = network.value
         d.asset = asset.value
         d.amount = amount
@@ -472,11 +568,98 @@ def admin_update_deposit(deposit, changes: dict) -> Deposit:
         d.tx_hash = tx_hash
         if "transaction_at" in changes:
             d.transaction_at = changes["transaction_at"]
+
+        if status == DepositStatus.COMPLETED:
+            reference = f"deposit:{d.pk}"
+            entry = _existing_entry(EntryType.DEPOSIT, reference)
+            if entry is not None:
+                _shift_balance(wallet, delta)
+                _rewrite_ledger_entry(
+                    entry,
+                    amount=usd_amount,
+                    balance_delta=usd_amount,
+                    description=_deposit_ledger_description(d),
+                    when=d.transaction_at or d.processed_at or entry.created_at,
+                )
+                _rechain_ledger(wallet)
+            elif delta != 0:
+                # Legacy row without its original ledger entry: record the correction as an adjustment.
+                stamp = timezone.now().strftime("%Y%m%d%H%M%S%f")
+                _apply(
+                    wallet, EntryType.ADJUSTMENT, abs(delta), balance=delta,
+                    reference=f"dep-edit:{d.pk}:{stamp}",
+                    description=f"Deposit {d.reference} edited by admin: {_fmt(old_usd)} -> {_fmt(usd_amount)}",
+                )
+
         d.save(update_fields=[
             "network", "asset", "amount", "rate", "usd_amount", "deposit_address",
             "tx_hash", "transaction_at", "updated_at",
         ])
     return d
+
+
+def admin_create_deposit(
+    admin_user, user, network, amount, *, rate=None, usd_amount=None, deposit_address="",
+    tx_hash="", transaction_at=None, admin_note="", complete=True,
+) -> Deposit:
+    """Admin manually adds a deposit to a user's account.
+
+    `amount` is in the asset's own units. A blank `rate` uses the live rate; a blank `usd_amount`
+    is amount x rate. With `complete=True` the deposit is approved straight away (balance credited,
+    ledger row written, user emailed, loan logic applied exactly like a normal approval); otherwise
+    it is created as a pending deposit.
+    """
+    network = Network(network)
+    asset = NETWORK_ASSET[network]
+
+    amount = _quantize_amount(asset, amount)
+    if amount <= 0:
+        raise BusinessError("invalid_amount", "Amount must be greater than zero.")
+
+    if rate is None:
+        rate = rates.get_quote(asset).rate  # 503 rate_unavailable -> admin can type a rate instead
+    rate = Decimal(rate).quantize(RATE_Q)
+    if rate <= 0:
+        raise BusinessError("invalid_amount", "Rate must be greater than zero.")
+
+    usd_amount = money(usd_amount) if usd_amount is not None else money(amount * rate)
+    if usd_amount <= 0:
+        raise BusinessError("invalid_amount", "USD amount must be greater than zero.")
+
+    address = (deposit_address or "").strip() or _deposit_address(network)
+    tx_hash = (tx_hash or "").strip().lower()[:100]
+
+    try:
+        with transaction.atomic():
+            _locked_wallet(user)
+            if tx_hash and Deposit.objects.filter(
+                tx_hash=tx_hash, status__in=[DepositStatus.PENDING, DepositStatus.COMPLETED]
+            ).exists():
+                raise BusinessError(
+                    "tx_hash_already_used", "This transaction hash has already been submitted.", status=409
+                )
+            deposit = Deposit.objects.create(
+                user=user,
+                reference=_new_reference(Deposit, "DEP-"),
+                network=network.value,
+                asset=asset.value,
+                amount=amount,
+                rate=rate,
+                usd_amount=usd_amount,
+                deposit_address=address,
+                tx_hash=tx_hash,
+                transaction_at=transaction_at,
+                admin_note=(admin_note or "").strip(),
+            )
+    except IntegrityError:
+        raise BusinessError(
+            "tx_hash_already_used", "This transaction hash has already been submitted.", status=409
+        )
+
+    if complete:
+        complete_deposit(deposit, admin_user)
+    deposit.refresh_from_db()
+    return deposit
 
 
 def complete_deposit(deposit, admin_user) -> None:
@@ -490,7 +673,7 @@ def complete_deposit(deposit, admin_user) -> None:
             entry = _apply(
                 wallet, EntryType.DEPOSIT, locked.usd_amount, balance=locked.usd_amount,
                 reference=reference,
-                description=f"Deposit {locked.reference} ({_fmt_amount(locked.amount)} {str(locked.asset).upper()})",
+                description=_deposit_ledger_description(locked),
             )
             _set_ledger_time(entry, locked.transaction_at)  # admin-chosen time, else the real time
             from loan import services as loan_services  # lazy import avoids a circular import
@@ -734,8 +917,12 @@ def cancel_withdrawal(user, withdrawal_id) -> Withdrawal:
 # --------------------------------------------------------------------------- #
 # Withdrawals (admin side)
 # --------------------------------------------------------------------------- #
+def _withdrawal_ledger_description(w) -> str:
+    return f"Withdrawal {w.reference} completed ({_fmt(w.usd_amount)} + {_fmt(w.fee_usd)} fee)"
+
+
 def admin_update_withdrawal(withdrawal, changes: dict) -> Withdrawal:
-    """Apply admin edits to a PENDING (OTP-confirmed) withdrawal before it is completed / failed.
+    """Apply admin edits to a withdrawal in ANY status.
 
     `changes` holds ONLY the fields the admin actually changed, any of:
         network, address, usd_amount, fee_percent, fee_usd, total_usd, rate, usdt_amount, transaction_at
@@ -745,15 +932,20 @@ def admin_update_withdrawal(withdrawal, changes: dict) -> Withdrawal:
       * total_usd   = usd_amount + fee_usd                    (when usd_amount, fee_percent or fee_usd changed)
       * usdt_amount = usd_amount / rate                       (when usd_amount or rate changed)
 
-    The reservation was already made at OTP confirmation, so if `total_usd` changes the reserved
-    amount is adjusted with an `adjustment` ledger entry (balance untouched, pending +/- difference).
-    Completing or failing the withdrawal afterwards uses the new total.
+    Money effects by status:
+      * awaiting_otp                     -> nothing reserved yet; the new values are used on confirmation.
+      * pending                          -> the reservation was already made, so if `total_usd` changes the
+                                            reserved amount is adjusted with an `adjustment` ledger entry
+                                            (balance untouched, pending +/- difference).
+      * completed                        -> the wallet balance moves by -(new total - old total), the
+                                            original `withdrawal` ledger row is rewritten with the new
+                                            details and the running balances are recalculated.
+      * failed / expired / cancelled     -> only the record changes.
     """
     with transaction.atomic():
         wallet = _locked_wallet(withdrawal.user)
         w = Withdrawal.objects.select_for_update().get(pk=withdrawal.pk)
-        if w.status != WithdrawalStatus.PENDING:
-            raise _conflict(w.status, "Only pending withdrawals can be edited.")
+        status = w.status
 
         old_total = _total_usd(w)
 
@@ -808,16 +1000,6 @@ def admin_update_withdrawal(withdrawal, changes: dict) -> Withdrawal:
             raise BusinessError("invalid_amount", "USDT amount must be greater than zero.")
 
         delta = money(total_usd - old_total)
-        if delta != 0:
-            stamp = timezone.now().strftime("%Y%m%d%H%M%S%f")
-            _apply(
-                wallet, EntryType.ADJUSTMENT, abs(delta), pending=delta,
-                reference=f"wd-edit:{w.pk}:{stamp}",
-                description=(
-                    f"Withdrawal {w.reference} edited by admin: reserved total "
-                    f"{_fmt(old_total)} -> {_fmt(total_usd)}"
-                ),
-            )
 
         w.network = network.value
         w.address = address
@@ -829,10 +1011,118 @@ def admin_update_withdrawal(withdrawal, changes: dict) -> Withdrawal:
         w.usdt_amount = usdt_amount
         if "transaction_at" in changes:
             w.transaction_at = changes["transaction_at"]
+
+        # ---- wallet + ledger effects (checked BEFORE the withdrawal row is saved)
+        if status == WithdrawalStatus.PENDING and delta != 0:
+            stamp = timezone.now().strftime("%Y%m%d%H%M%S%f")
+            _apply(
+                wallet, EntryType.ADJUSTMENT, abs(delta), pending=delta,
+                reference=f"wd-edit:{w.pk}:{stamp}",
+                description=(
+                    f"Withdrawal {w.reference} edited by admin: reserved total "
+                    f"{_fmt(old_total)} -> {_fmt(total_usd)}"
+                ),
+            )
+        elif status == WithdrawalStatus.COMPLETED:
+            reference = f"withdrawal:{w.pk}"
+            entry = _existing_entry(EntryType.WITHDRAWAL, reference)
+            if entry is not None:
+                # The balance already lost old_total; it must now lose total_usd instead.
+                _shift_balance(wallet, -delta)
+                _rewrite_ledger_entry(
+                    entry,
+                    amount=total_usd,
+                    balance_delta=-total_usd,
+                    description=_withdrawal_ledger_description(w),
+                    when=w.transaction_at or w.processed_at or entry.created_at,
+                )
+                _rechain_ledger(wallet)
+            elif delta != 0:
+                # Legacy row without its original ledger entry: record the correction as an adjustment.
+                stamp = timezone.now().strftime("%Y%m%d%H%M%S%f")
+                _apply(
+                    wallet, EntryType.ADJUSTMENT, abs(delta), balance=-delta,
+                    reference=f"wd-edit:{w.pk}:{stamp}",
+                    description=(
+                        f"Withdrawal {w.reference} edited by admin: total deducted "
+                        f"{_fmt(old_total)} -> {_fmt(total_usd)}"
+                    ),
+                )
+
         w.save(update_fields=[
             "network", "address", "rate", "usd_amount", "fee_percent", "fee_usd",
             "total_usd", "usdt_amount", "transaction_at", "updated_at",
         ])
+    return w
+
+
+def admin_create_withdrawal(
+    admin_user, user, network, address, usd_amount, *, fee_percent=None, rate=None,
+    transaction_at=None, admin_tx_hash="", admin_note="", complete=True,
+) -> Withdrawal:
+    """Admin manually adds a withdrawal to a user's account (no OTP step).
+
+    `usd_amount` is what the user RECEIVES; the fee is added on top. A blank `fee_percent` uses
+    settings.WITHDRAWAL_FEE_PERCENT and a blank `rate` uses the live USDT rate. The funds
+    (amount + fee) are reserved immediately and the user must have enough available balance.
+    With `complete=True` the withdrawal is completed straight away (balance reduced, ledger row
+    written, user emailed); otherwise it stays pending in the admin queue.
+    """
+    if Network(network) not in USDT_NETWORKS:
+        raise BusinessError(
+            "withdrawal_network_unsupported",
+            "Withdrawals are only available in USDT (BEP20, ERC20 or TRC20).",
+        )
+    usd_amount = money(usd_amount)
+    if usd_amount <= 0:
+        raise BusinessError("invalid_amount", "USD amount must be greater than zero.")
+    address = validate_address(network, address)
+
+    if fee_percent is not None:
+        fee_percent = Decimal(fee_percent)
+        if fee_percent < 0 or fee_percent >= HUNDRED:
+            raise BusinessError("invalid_amount", "Fee percent must be between 0 and 100.")
+
+    if rate is None:
+        rate = rates.get_quote(Asset.USDT).rate  # 503 rate_unavailable -> admin can type a rate instead
+    rate = Decimal(rate).quantize(RATE_Q)
+    if rate <= 0:
+        raise BusinessError("invalid_amount", "Rate must be greater than zero.")
+
+    amounts = calculate_withdrawal_amounts(usd_amount, fee_percent)
+    now = timezone.now()
+
+    with transaction.atomic():
+        wallet = _locked_wallet(user)
+        _check_funds(wallet, amounts["total_usd"])
+
+        w = Withdrawal.objects.create(
+            user=user,
+            reference=_new_reference(Withdrawal, "WDR-"),
+            network=Network(network).value,
+            address=address,
+            usd_amount=amounts["usd_amount"],
+            fee_percent=amounts["fee_percent"],
+            fee_usd=amounts["fee_usd"],
+            total_usd=amounts["total_usd"],
+            rate=rate,
+            usdt_amount=to_usdt(amounts["usd_amount"] / rate),
+            status=WithdrawalStatus.PENDING,
+            expires_at=now,
+            confirmed_at=now,
+            transaction_at=transaction_at,
+            admin_tx_hash=(admin_tx_hash or "").strip()[:100],
+            admin_note=(admin_note or "").strip(),
+        )
+        _apply(
+            wallet, EntryType.WITHDRAWAL_RESERVE, amounts["total_usd"], pending=amounts["total_usd"],
+            reference=f"withdrawal:{w.pk}",
+            description=f"Withdrawal {w.reference} reserved ({_fmt(w.usd_amount)} + {_fmt(w.fee_usd)} fee)",
+        )
+
+    if complete:
+        complete_withdrawal(w, admin_user, w.admin_tx_hash)
+    w.refresh_from_db()
     return w
 
 
@@ -850,7 +1140,7 @@ def complete_withdrawal(withdrawal, admin_user, tx_hash="") -> None:
                 wallet, EntryType.WITHDRAWAL, total,
                 balance=-total, pending=-total,
                 reference=reference,
-                description=f"Withdrawal {w.reference} completed ({_fmt(w.usd_amount)} + {_fmt(w.fee_usd)} fee)",
+                description=_withdrawal_ledger_description(w),
             )
             _set_ledger_time(entry, w.transaction_at)  # admin-chosen time, else the real time
         w.status = WithdrawalStatus.COMPLETED
