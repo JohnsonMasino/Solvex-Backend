@@ -1,7 +1,9 @@
+import re
 import secrets
 import string
 
 from django.conf import settings
+from django.core.exceptions import ValidationError
 from django.db import models
 from django.db.models import F, Q
 
@@ -55,6 +57,24 @@ ASSET_DECIMALS = {Asset.USDT: 6, Asset.BTC: 8, Asset.ETH: 8}
 USDT_NETWORKS = (Network.BEP20, Network.ERC20, Network.TRC20)
 WITHDRAWAL_NETWORK_CHOICES = [(n.value, n.label) for n in USDT_NETWORKS]
 
+# Address format per network (used for withdrawal addresses AND the admin-managed deposit addresses).
+ADDRESS_REGEX = {
+    Network.BEP20: r"^0x[a-fA-F0-9]{40}$",
+    Network.ERC20: r"^0x[a-fA-F0-9]{40}$",
+    Network.TRC20: r"^T[1-9A-HJ-NP-Za-km-z]{33}$",
+    Network.BTC: r"^(bc1[02-9ac-hj-np-z]{11,71}|[13][a-km-zA-HJ-NP-Z1-9]{25,34})$",
+    Network.ETH: r"^0x[a-fA-F0-9]{40}$",
+}
+
+# Which DepositAddressSettings column holds the company address of each network.
+ADDRESS_FIELDS = {
+    Network.BEP20: "bep20_address",
+    Network.ERC20: "erc20_address",
+    Network.TRC20: "trc20_address",
+    Network.BTC: "btc_address",
+    Network.ETH: "eth_address",
+}
+
 
 def asset_for_network(network) -> "Asset":
     return NETWORK_ASSET[Network(network)]
@@ -87,6 +107,59 @@ class WithdrawalStatus(models.TextChoices):
     FAILED = "failed", "Failed"
     EXPIRED = "expired", "Expired"
     CANCELLED = "cancelled", "Cancelled"
+
+
+# --------------------------------------------------------------------------- #
+# Company deposit addresses (managed in the admin console, replaces the env vars)
+# --------------------------------------------------------------------------- #
+class DepositAddressSettings(UUIDModel, TimeStampedModel):
+    """Singleton row holding the company deposit address of every network.
+
+    Edit it in the admin ("Deposit addresses"). Changes go live immediately, no redeploy needed.
+    A blank address disables deposits on that network. Deposits that already exist keep the
+    address that was shown to the user when they were created.
+    """
+
+    bep20_address = models.CharField("USDT (BEP20 – BNB Smart Chain) address", max_length=100, blank=True)
+    erc20_address = models.CharField("USDT (ERC20 – Ethereum) address", max_length=100, blank=True)
+    trc20_address = models.CharField("USDT (TRC20 – TRON) address", max_length=100, blank=True)
+    btc_address = models.CharField("BTC (Bitcoin) address", max_length=100, blank=True)
+    eth_address = models.CharField("ETH (Ethereum) address", max_length=100, blank=True)
+    updated_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, null=True, blank=True, on_delete=models.SET_NULL, related_name="+"
+    )
+
+    class Meta:
+        verbose_name = "Deposit addresses"
+        verbose_name_plural = "Deposit addresses"
+
+    def __str__(self):
+        return "Company deposit addresses"
+
+    @classmethod
+    def load(cls) -> "DepositAddressSettings":
+        obj = cls.objects.first()
+        if obj is None:
+            obj = cls.objects.create()
+        return obj
+
+    def address_for(self, network) -> str:
+        return (getattr(self, ADDRESS_FIELDS[Network(network)]) or "").strip()
+
+    def clean(self):
+        errors = {}
+        for network, field in ADDRESS_FIELDS.items():
+            value = (getattr(self, field) or "").strip()
+            setattr(self, field, value)
+            if value and not re.match(ADDRESS_REGEX[network], value):
+                errors[field] = f"This is not a valid {network.label} address."
+        if errors:
+            raise ValidationError(errors)
+
+    def save(self, *args, **kwargs):
+        if self._state.adding and DepositAddressSettings.objects.exists():
+            raise RuntimeError("Only one DepositAddressSettings row is allowed. Edit the existing one.")
+        super().save(*args, **kwargs)
 
 
 # --------------------------------------------------------------------------- #
@@ -179,6 +252,10 @@ class Deposit(UUIDModel, TimeStampedModel):
     status = models.CharField(max_length=10, choices=DepositStatus.choices, default=DepositStatus.PENDING, db_index=True)
     decline_reason = models.TextField(blank=True)
     admin_note = models.TextField(blank=True)
+    transaction_at = models.DateTimeField(
+        null=True, blank=True,
+        help_text="Admin override of the transaction date/time. Leave as shown to keep the actual time.",
+    )
     processed_by = models.ForeignKey(
         settings.AUTH_USER_MODEL, null=True, blank=True, on_delete=models.SET_NULL, related_name="+"
     )
@@ -200,6 +277,11 @@ class Deposit(UUIDModel, TimeStampedModel):
         return f"{self.reference} {self.amount} {str(self.asset).upper()} = {self.usd_amount} USD ({self.status})"
 
     @property
+    def effective_at(self):
+        """The date/time shown to the user: the admin override if set, else the real creation time."""
+        return self.transaction_at or self.created_at
+
+    @property
     def usdt_amount(self):
         """Deprecated alias kept so old email templates / code that read `deposit.usdt_amount`
         don't crash. Prefer `amount` + `asset`."""
@@ -211,7 +293,7 @@ class Deposit(UUIDModel, TimeStampedModel):
 # --------------------------------------------------------------------------- #
 class Withdrawal(UUIDModel, TimeStampedModel):
     """
-    Money model (all frozen at creation):
+    Money model (all frozen at creation, admin can edit while the withdrawal is `pending`):
 
         usd_amount   USD value the user RECEIVES (paid out in USDT)
         fee_percent  fee rate applied (e.g. 1.50)
@@ -248,6 +330,10 @@ class Withdrawal(UUIDModel, TimeStampedModel):
     admin_tx_hash = models.CharField(max_length=100, blank=True)
     failure_reason = models.TextField(blank=True)
     admin_note = models.TextField(blank=True)
+    transaction_at = models.DateTimeField(
+        null=True, blank=True,
+        help_text="Admin override of the transaction date/time. Leave as shown to keep the actual time.",
+    )
     processed_by = models.ForeignKey(
         settings.AUTH_USER_MODEL, null=True, blank=True, on_delete=models.SET_NULL, related_name="+"
     )
@@ -262,3 +348,8 @@ class Withdrawal(UUIDModel, TimeStampedModel):
 
     def __str__(self):
         return f"{self.reference} {self.usd_amount} USD + {self.fee_usd} fee ({self.status})"
+
+    @property
+    def effective_at(self):
+        """The date/time shown to the user: the admin override if set, else the real creation time."""
+        return self.transaction_at or self.created_at

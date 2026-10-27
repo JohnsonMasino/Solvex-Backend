@@ -556,5 +556,3 @@ class ExpirePendingWithdrawalsView(APIView):
         count = services.expire_pending_withdrawals()
         return success_response({"expired_withdrawals": count}, message="Expired pending withdrawals.")
 
-
-# WalletSummaryView

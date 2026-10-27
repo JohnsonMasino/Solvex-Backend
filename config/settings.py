@@ -186,11 +186,8 @@ PENDING_TRANSACTION_EXPIRY_MINUTES = config("PENDING_TRANSACTION_EXPIRY_MINUTES"
 USDT_USD_RATE = config("USDT_USD_RATE", default="1.00", cast=Decimal)
 BTC_USD_RATE = config("BTC_USD_RATE", default="0", cast=Decimal)
 ETH_USD_RATE = config("ETH_USD_RATE", default="0", cast=Decimal)
-DEPOSIT_ADDRESS_BTC = config("DEPOSIT_ADDRESS_BTC", default="")
-DEPOSIT_ADDRESS_ETH = config("DEPOSIT_ADDRESS_ETH", default="")
-DEPOSIT_ADDRESS_BEP20 = config("DEPOSIT_ADDRESS_BEP20", default="")
-DEPOSIT_ADDRESS_ERC20 = config("DEPOSIT_ADDRESS_ERC20", default="")
-DEPOSIT_ADDRESS_TRC20 = config("DEPOSIT_ADDRESS_TRC20", default="")
+# NOTE: the company deposit addresses (BTC / ETH / USDT BEP20, ERC20, TRC20) are no longer
+# environment variables. Manage them in the admin console: Wallet > Deposit addresses.
 REFERRAL_BONUS_USD = config("REFERRAL_BONUS_USD", default="3.00", cast=Decimal)
 TRADE_MIN_AMOUNT = config("TRADE_MIN_AMOUNT", default="10.00", cast=Decimal)
 TRADE_MAX_LEVERAGE = config("TRADE_MAX_LEVERAGE", default=100, cast=int)
@@ -265,6 +262,7 @@ JAZZMIN_SETTINGS = {
         "accounts.User":        "fas fa-user",
         "accounts.OTPCode":     "fas fa-key",
         "wallet":               "fas fa-wallet",
+        "wallet.DepositAddressSettings": "fas fa-qrcode",
         "investment":           "fas fa-chart-line",
         "management":           "fas fa-cogs",
         "auth.Group":           "fas fa-layer-group",
