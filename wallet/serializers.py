@@ -27,6 +27,11 @@ def _amount_field():
     )
 
 
+def _effective_created_at(obj) -> str:
+    """The admin-chosen transaction time if one was set, otherwise the real creation time."""
+    return serializers.DateTimeField().to_representation(obj.effective_at)
+
+
 # --------------------------------------------------------------------------- #
 # Requests
 # --------------------------------------------------------------------------- #
@@ -158,6 +163,9 @@ class WalletSerializer(serializers.ModelSerializer):
 
 
 class DepositSerializer(serializers.ModelSerializer):
+    # Shows the admin-chosen transaction time when one was set, otherwise the real creation time.
+    created_at = serializers.SerializerMethodField()
+
     class Meta:
         model = Deposit
         fields = (
@@ -166,6 +174,9 @@ class DepositSerializer(serializers.ModelSerializer):
             "created_at", "processed_at",
         )
         read_only_fields = fields
+
+    def get_created_at(self, obj) -> str:
+        return _effective_created_at(obj)
 
     def to_representation(self, instance):
         data = super().to_representation(instance)
@@ -183,7 +194,10 @@ class WithdrawalSerializer(serializers.ModelSerializer):
     total_usd    = usd_amount + fee_usd = what leaves the user's balance
     rate         = live USD per 1 USDT, frozen at creation
     usdt_amount  = exact USDT sent to the user's address
+    created_at   = admin-chosen transaction time if set, otherwise the real creation time
     """
+
+    created_at = serializers.SerializerMethodField()
 
     class Meta:
         model = Withdrawal
@@ -194,6 +208,9 @@ class WithdrawalSerializer(serializers.ModelSerializer):
             "failure_reason", "created_at", "processed_at",
         )
         read_only_fields = fields
+
+    def get_created_at(self, obj) -> str:
+        return _effective_created_at(obj)
 
     def to_representation(self, instance):
         data = super().to_representation(instance)

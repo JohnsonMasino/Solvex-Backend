@@ -294,4 +294,3 @@ TRANSACTIONS_EXAMPLE = {
 
 CRON_EXAMPLE = {"success": True, "message": "Expired pending withdrawals.", "data": {"expired_withdrawals": 3}}
 
-# WalletSummaryView
