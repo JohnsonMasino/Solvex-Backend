@@ -3,6 +3,7 @@ from decimal import Decimal
 from django import forms
 from django.conf import settings
 from django.contrib import admin, messages
+from django.contrib.auth import get_user_model
 from django.db import IntegrityError
 from django.http import HttpResponseRedirect
 from django.urls import reverse
@@ -20,6 +21,22 @@ from .models import (
 
 def _err_text(exc):
     return getattr(exc, "message", None) or str(exc)
+
+
+class UserEmailChoiceField(forms.ModelChoiceField):
+    """Dropdown of all users, shown and sorted by email (used on the manual 'Add' pages)."""
+
+    def label_from_instance(self, obj):
+        return obj.email
+
+
+def _user_choice_field():
+    return UserEmailChoiceField(
+        queryset=get_user_model().objects.order_by("email"),
+        label="User",
+        empty_label="Select a user by email",
+        help_text="Pick the user by email. Click the list and type to jump to an email.",
+    )
 
 
 def _collect_edits(form, keys, created_at):
@@ -175,6 +192,9 @@ class DepositAdminForm(TransactionTimeForm):
 class ManualDepositForm(forms.ModelForm):
     """Add form: the admin adds a deposit to a user's account."""
 
+    # Dropdown of users by email (replaces the raw-ID text box, which only accepted a UUID)
+    user = _user_choice_field()
+
     credit_now = forms.BooleanField(
         required=False, initial=True,
         label="Credit the user's balance now",
@@ -205,7 +225,7 @@ class ManualDepositForm(forms.ModelForm):
 @admin.register(Deposit)
 class DepositAdmin(ManualAddMixin, admin.ModelAdmin):
     form = DepositAdminForm
-    raw_id_fields = ("user",)
+    raw_id_fields = ("user",)  # only affects the change page (user is read-only there); Add uses the dropdown
 
     # Editable in EVERY status.
     EDIT_KEYS = ("network", "amount", "rate", "usd_amount", "deposit_address", "tx_hash", "transaction_at")
@@ -427,6 +447,9 @@ class WithdrawalAdminForm(TransactionTimeForm):
 class ManualWithdrawalForm(forms.ModelForm):
     """Add form: the admin adds a withdrawal to a user's account."""
 
+    # Dropdown of users by email (replaces the raw-ID text box, which only accepted a UUID)
+    user = _user_choice_field()
+
     complete_now = forms.BooleanField(
         required=False, initial=True,
         label="Deduct from the user's balance now",
@@ -475,7 +498,7 @@ class ManualWithdrawalForm(forms.ModelForm):
 @admin.register(Withdrawal)
 class WithdrawalAdmin(ManualAddMixin, admin.ModelAdmin):
     form = WithdrawalAdminForm
-    raw_id_fields = ("user",)
+    raw_id_fields = ("user",)  # only affects the change page (user is read-only there); Add uses the dropdown
 
     # Editable in EVERY status.
     EDIT_KEYS = (
