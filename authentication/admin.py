@@ -1,12 +1,11 @@
 from django import forms
 from django.contrib import admin, messages
-from django.contrib.admin.actions import delete_selected
 from django.contrib.auth.admin import UserAdmin as BaseUserAdmin
 from django.contrib.auth.forms import UserChangeForm
 from django.db import transaction
+from django.db.models import ProtectedError, RestrictedError
 from django.utils import timezone
 from rest_framework_simplejwt.token_blacklist.models import OutstandingToken
-from django.db.models import ProtectedError, RestrictedError
 
 from . import services
 from .models import EmailOTP, PasswordResetToken, User
@@ -40,14 +39,10 @@ class AdminUserChangeForm(UserChangeForm):
         model = User
         fields = "__all__"
 
+
 def _purge(queryset, _depth=0):
     """Delete `queryset`, first deleting any rows that PROTECT (or RESTRICT) it.
-
-    Some models point at the user with on_delete=PROTECT (wallet ledger, deposits, trades, KYC...).
-    Django raises before touching the database in that case, so we delete the blocking rows
-    first and retry. Protected rows can themselves be protected by other rows, hence the loop.
-    Must be called inside transaction.atomic().
-    """
+    Must be called inside transaction.atomic()."""
     if _depth > 25:
         raise RuntimeError("Could not resolve protected relations while deleting (too deep).")
     for _ in range(50):
@@ -65,15 +60,17 @@ def _purge(queryset, _depth=0):
                 _purge(model._base_manager.filter(pk__in=pks), _depth + 1)
     raise RuntimeError("Could not resolve protected relations while deleting.")
 
+
 def _is_protected_account(request, user):
     """Accounts the current admin may never delete."""
-    if user.is_superuser:          # incl. the superuser created during migration
+    if user.is_superuser:           # incl. the superuser created during migration
         return True
     if user.pk == request.user.pk:  # nobody deletes themselves
         return True
     if user.is_staff and not request.user.is_superuser:  # staff can't delete other staff
         return True
     return False
+
 
 @admin.register(User)
 class UserAdmin(BaseUserAdmin):
@@ -97,7 +94,15 @@ class UserAdmin(BaseUserAdmin):
         (None, {"classes": ("wide",), "fields": (
             "email", "full_name", "password1", "password2", "is_email_verified", "is_staff", "is_superuser")}),
     )
-    actions = ["unlock_accounts", "deactivate_accounts", "delete_selected_users"]
+    # Django's built-in "Delete selected users" action stays enabled (do NOT remove it in get_actions).
+    actions = ["unlock_accounts", "activate_accounts", "deactivate_accounts"]
+
+    def get_readonly_fields(self, request, obj=None):
+        readonly = list(super().get_readonly_fields(request, obj))
+        if not request.user.is_superuser:
+            # staff must not be able to promote themselves or demote other admins
+            readonly += ["is_superuser", "is_staff", "groups", "user_permissions"]
+        return readonly
 
     # ------------------------------------------------------------------ account actions
     @admin.action(description="Unlock selected accounts")
@@ -105,7 +110,12 @@ class UserAdmin(BaseUserAdmin):
         n = queryset.update(failed_login_attempts=0, locked_until=None, updated_at=timezone.now())
         self.message_user(request, f"Unlocked {n} account(s).", messages.SUCCESS)
 
-    @admin.action(description="Deactivate selected")
+    @admin.action(description="Activate selected accounts")
+    def activate_accounts(self, request, queryset):
+        n = queryset.update(is_active=True, updated_at=timezone.now())
+        self.message_user(request, f"Activated {n} account(s).", messages.SUCCESS)
+
+    @admin.action(description="Deactivate selected (does NOT delete)")
     def deactivate_accounts(self, request, queryset):
         queryset = queryset.exclude(pk=request.user.pk)  # never deactivate yourself
         count = 0
@@ -117,43 +127,16 @@ class UserAdmin(BaseUserAdmin):
         self.message_user(request, f"Deactivated {count} account(s).", messages.SUCCESS)
 
     # ------------------------------------------------------------------ deleting users
-    # Rules:
-    #   * Any user can be deleted, and everything tied to the account is deleted with it
-    #     (wallet, ledger, deposits, withdrawals, KYC, loans, trades, referrals, OTPs, reset
-    #     tokens...). That is done by the database CASCADE on each model's user foreign key.
-    #   * Superusers (including the one created during migration) can NEVER be deleted.
-    #   * Nobody can delete their own account.
+    #   * Normal users are deleted together with ALL their data. Several models use
+    #     on_delete=PROTECT, so _purge() deletes the blocking rows first.
+    #   * Superusers can never be deleted. Nobody can delete their own account.
+    #   * Staff can't delete other staff; only a superuser can.
     def has_delete_permission(self, request, obj=None):
         if obj is not None and _is_protected_account(request, obj):
             return False
         return super().has_delete_permission(request, obj)
 
-    def get_actions(self, request):
-        actions = super().get_actions(request)
-        actions.pop("delete_selected", None)  # replaced by the safe version below
-        return actions
-
-    @admin.action(description="Delete selected users and ALL their data", permissions=["delete"])
-    def delete_selected_users(self, request, queryset):
-        deletable_ids = [u.pk for u in queryset if not _is_protected_account(request, u)]
-        skipped = queryset.count() - len(deletable_ids)
-        if skipped:
-            self.message_user(
-                request,
-                f"{skipped} account(s) skipped: superusers, staff accounts (unless you are a superuser) "
-                f"and your own account can't be deleted.",
-                messages.WARNING,
-            )
-        deletable = queryset.filter(pk__in=deletable_ids)
-        if not deletable.exists():
-            return None
-        return delete_selected(self, request, deletable)
-
     def get_deleted_objects(self, objs, request):
-        """Anyone who holds the 'Can delete user' permission may delete the user together with all
-        related data. Django would otherwise block the page because other apps' admins are
-        view-only and some relations are PROTECTed; both blocks are lifted here and the
-        protected rows are removed by _purge()."""
         to_delete, model_count, perms_needed, protected = super().get_deleted_objects(objs, request)
         if request.user.has_perm("authentication.delete_user"):
             perms_needed = set()
@@ -172,6 +155,14 @@ class UserAdmin(BaseUserAdmin):
 
     def delete_queryset(self, request, queryset):
         ids = [u.pk for u in queryset if not _is_protected_account(request, u)]
+        skipped = queryset.count() - len(ids)
+        if skipped:
+            self.message_user(
+                request,
+                f"{skipped} account(s) skipped: superusers, staff accounts (unless you are a "
+                f"superuser) and your own account can't be deleted.",
+                messages.WARNING,
+            )
         queryset = queryset.filter(pk__in=ids)
         with transaction.atomic():
             OutstandingToken.objects.filter(user__in=queryset).delete()
