@@ -1,8 +1,11 @@
 from django import forms
 from django.contrib import admin, messages
+from django.contrib.admin.actions import delete_selected
 from django.contrib.auth.admin import UserAdmin as BaseUserAdmin
 from django.contrib.auth.forms import UserChangeForm
+from django.db import transaction
 from django.utils import timezone
+from rest_framework_simplejwt.token_blacklist.models import OutstandingToken
 
 from . import services
 from .models import EmailOTP, PasswordResetToken, User
@@ -59,8 +62,9 @@ class UserAdmin(BaseUserAdmin):
         (None, {"classes": ("wide",), "fields": (
             "email", "full_name", "password1", "password2", "is_email_verified", "is_staff", "is_superuser")}),
     )
-    actions = ["unlock_accounts", "deactivate_accounts"]
+    actions = ["unlock_accounts", "deactivate_accounts", "delete_selected_users"]
 
+    # ------------------------------------------------------------------ account actions
     @admin.action(description="Unlock selected accounts")
     def unlock_accounts(self, request, queryset):
         n = queryset.update(failed_login_attempts=0, locked_until=None, updated_at=timezone.now())
@@ -76,6 +80,64 @@ class UserAdmin(BaseUserAdmin):
             services.blacklist_all_tokens(user)
             count += 1
         self.message_user(request, f"Deactivated {count} account(s).", messages.SUCCESS)
+
+    # ------------------------------------------------------------------ deleting users
+    # Rules:
+    #   * Any user can be deleted, and everything tied to the account is deleted with it
+    #     (wallet, ledger, deposits, withdrawals, KYC, loans, trades, referrals, OTPs, reset
+    #     tokens...). That is done by the database CASCADE on each model's user foreign key.
+    #   * Superusers (including the one created during migration) can NEVER be deleted.
+    #   * Nobody can delete their own account.
+    def has_delete_permission(self, request, obj=None):
+        if obj is not None and (obj.is_superuser or obj.pk == request.user.pk):
+            return False
+        return super().has_delete_permission(request, obj)
+
+    def get_actions(self, request):
+        actions = super().get_actions(request)
+        # Replace Django's built-in bulk delete with the safe version below.
+        actions.pop("delete_selected", None)
+        return actions
+
+    @admin.action(description="Delete selected users and ALL their data", permissions=["delete"])
+    def delete_selected_users(self, request, queryset):
+        protected = queryset.filter(is_superuser=True) | queryset.filter(pk=request.user.pk)
+        protected_count = protected.distinct().count()
+        deletable = queryset.exclude(is_superuser=True).exclude(pk=request.user.pk)
+
+        if protected_count:
+            self.message_user(
+                request,
+                f"{protected_count} account(s) skipped: superusers and your own account can't be deleted.",
+                messages.WARNING,
+            )
+        if not deletable.exists():
+            return None
+        return delete_selected(self, request, deletable)
+
+    def get_deleted_objects(self, objs, request):
+        """Django refuses to delete a user if the admin lacks delete permission on any RELATED
+        model, and several apps' admin classes are view-only (delete disabled). A superuser
+        may delete users together with that related data, so the permission check is lifted."""
+        to_delete, model_count, perms_needed, protected = super().get_deleted_objects(objs, request)
+        if request.user.is_superuser:
+            perms_needed = set()
+        return to_delete, model_count, perms_needed, protected
+
+    def delete_model(self, request, obj):
+        if obj.is_superuser or obj.pk == request.user.pk:
+            self.message_user(request, "This account can't be deleted.", messages.ERROR)
+            return
+        with transaction.atomic():
+            # simplejwt's OutstandingToken.user is SET_NULL, so remove the user's tokens explicitly.
+            OutstandingToken.objects.filter(user=obj).delete()
+            super().delete_model(request, obj)
+
+    def delete_queryset(self, request, queryset):
+        queryset = queryset.exclude(is_superuser=True).exclude(pk=request.user.pk)
+        with transaction.atomic():
+            OutstandingToken.objects.filter(user__in=queryset).delete()
+            queryset.delete()
 
 
 class ReadOnlyAdmin(admin.ModelAdmin):
