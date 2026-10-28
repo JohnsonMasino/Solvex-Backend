@@ -16,6 +16,11 @@ admin: approve_loan() -> status active, the clock starts, "approved" email is se
        reject_loan()  -> status rejected (reason required), "declined" email is sent
 user: cancel_loan()   -> pending -> cancelled
 
+Eligibility
+-----------
+There is NO balance gate: any KYC-approved user can request a loan as long as they do not already
+have a pending or active loan (KYC is enforced on the endpoint by IsKYCApproved).
+
 Money model
 -----------
 * wallet.balance is always a REAL, non-negative number (the wallet DB constraints stay intact).
@@ -66,10 +71,6 @@ def min_amount() -> Decimal:
 
 def max_amount() -> Decimal:
     return money(_dec("LOAN_MAX_AMOUNT", "10000.00"))
-
-
-def max_eligible_balance() -> Decimal:
-    return money(_dec("LOAN_MAX_ELIGIBLE_BALANCE", "50.00"))
 
 
 def daily_rate_percent() -> Decimal:
@@ -150,7 +151,6 @@ def get_config() -> dict:
         "currency": "USD",
         "min_loan_usd": _fmt(min_amount()),
         "max_loan_usd": _fmt(max_amount()),
-        "max_eligible_balance_usd": _fmt(max_eligible_balance()),
         "daily_interest_percent": _pct(daily_rate_percent()),
         "overdue_daily_interest_percent": _pct(overdue_rate_percent()),
         "durations": [
@@ -163,6 +163,8 @@ def get_config() -> dict:
 
 
 def get_eligibility(user) -> dict:
+    """Only an existing pending/active loan blocks a new request. There is no balance limit.
+    (KYC is checked separately when the request is created.)"""
     wallet = wallet_services.get_or_create_wallet(user)
     open_loan = get_open_loan(user)
     reasons = []
@@ -170,13 +172,10 @@ def get_eligibility(user) -> dict:
         reasons.append(
             "loan_request_pending" if open_loan.status == LoanStatus.PENDING else "active_loan_exists"
         )
-    if wallet.balance >= max_eligible_balance():
-        reasons.append("balance_too_high")
     return {
         "eligible": not reasons,
         "reasons": reasons,
         "balance": _fmt(wallet.balance),
-        "max_eligible_balance_usd": _fmt(max_eligible_balance()),
         "min_loan_usd": _fmt(min_amount()),
         "max_loan_usd": _fmt(max_amount()),
         "open_loan_id": str(open_loan.pk) if open_loan else None,
@@ -204,19 +203,10 @@ def request_loan(user, amount, duration) -> Loan:
 
     try:
         with transaction.atomic():
-            wallet = wallet_services._locked_wallet(user)  # per-user mutex (wallet row first)
+            wallet_services._locked_wallet(user)  # per-user mutex (wallet row first)
             existing = get_open_loan(user)
             if existing is not None:
                 raise _open_loan_error(existing)
-            if wallet.balance >= max_eligible_balance():
-                raise BusinessError(
-                    "balance_too_high",
-                    f"You can only borrow when your balance is below {_fmt(max_eligible_balance())} USD.",
-                    data={
-                        "balance": _fmt(wallet.balance),
-                        "max_eligible_balance_usd": _fmt(max_eligible_balance()),
-                    },
-                )
             loan = Loan.objects.create(
                 user=user,
                 reference=wallet_services._new_reference(Loan, "LN-"),

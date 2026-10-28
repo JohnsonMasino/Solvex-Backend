@@ -40,10 +40,11 @@ class LoanConfigView(APIView):
     @extend_schema(
         tags=[TAG], summary="Loan configuration (durations, limits, rates)",
         description=(
-            "Returns the available loan **durations**, the min / max loan size, the maximum wallet balance that "
-            "still qualifies for a loan, and the daily interest rates (`daily_interest_percent` within the term, "
-            "`overdue_daily_interest_percent` after the due date). Build the duration picker from `durations`. "
-            "`requires_admin_approval` is always `true`: a request must be approved by an admin."
+            "Returns the available loan **durations**, the min / max loan size and the daily interest rates "
+            "(`daily_interest_percent` within the term, `overdue_daily_interest_percent` after the due date). "
+            "Build the duration picker from `durations`. `requires_admin_approval` is always `true`: a request "
+            "must be approved by an admin.\n\n"
+            "**There is no balance limit any more**: `max_eligible_balance_usd` was removed from this response."
             + docs.LOAN_GUIDE
         ),
         responses={
@@ -62,10 +63,12 @@ class LoanEligibilityView(APIView):
         tags=[TAG], summary="Can I request a loan?",
         description=(
             "Tells the caller whether they can request a loan right now. `reasons` lists why not: "
-            "`loan_request_pending` (a request is waiting for admin approval), `active_loan_exists` (repay the "
-            "current loan first) and/or `balance_too_high` (wallet balance must be below "
-            "`max_eligible_balance_usd`). `open_loan_id` / `open_loan_status` point to the pending or active loan. "
-            "KYC is checked when the request is created."
+            "`loan_request_pending` (a request is waiting for admin approval) and/or `active_loan_exists` "
+            "(repay the current loan first). **The wallet balance no longer matters**: `balance_too_high` and "
+            "`max_eligible_balance_usd` were removed. `open_loan_id` / `open_loan_status` point to the pending "
+            "or active loan.\n\n"
+            "**KYC is not checked here.** It is checked when the request is created (`403 kyc_required`), so "
+            "also read `access.can_request_loan` from `GET /kyc/status/`."
         ),
         responses={
             200: success_response_doc(
@@ -120,9 +123,9 @@ class LoanListCreateView(APIView):
         description=(
             "Submits a loan **request** (Tier 2 / KYC approved only). The loan is created with `status: \"pending\"`: "
             "nothing is owed and no interest runs until an admin approves it. The user is emailed a confirmation and "
-            "another email when the request is approved or declined. Requirements: wallet `balance` below "
-            "`max_eligible_balance_usd`, no other pending/active loan, amount between `min_loan_usd` and "
-            "`max_loan_usd`."
+            "another email when the request is approved or declined. Requirements: no other pending/active loan, "
+            "amount between `min_loan_usd` and `max_loan_usd`. **There is no wallet-balance limit** (the old "
+            "`balance_too_high` rule was removed)."
             + docs.LOAN_GUIDE
         ),
         request=LoanCreateSerializer,
@@ -133,16 +136,13 @@ class LoanListCreateView(APIView):
                 message="Your loan request has been submitted and is waiting for admin approval.",
             ),
             400: docs.wallet_error(
-                "Invalid fields, amount out of range, or balance too high.",
+                "Invalid fields or amount out of range.",
                 {"code": "validation_error", "message": "Please correct the highlighted fields.",
                  "errors": {"duration": ['"5_days" is not a valid choice.']}},
                 {"code": "loan_below_minimum", "message": "The minimum loan is 10.00 USD.",
                  "data": {"min_loan_usd": "10.00"}},
                 {"code": "loan_above_maximum", "message": "The maximum loan is 10000.00 USD.",
                  "data": {"max_loan_usd": "10000.00"}},
-                {"code": "balance_too_high",
-                 "message": "You can only borrow when your balance is below 50.00 USD.",
-                 "data": {"balance": "120.00", "max_eligible_balance_usd": "50.00"}},
             ),
             401: docs.UNAUTH,
             403: docs.KYC_REQUIRED,

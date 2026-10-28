@@ -40,12 +40,22 @@ class StatusView(APIView):
 
     @extend_schema(
         tags=[TAG],
-        summary="My KYC status",
-        description="Returns the caller's tier, KYC status, attempt counters and latest submission summary.",
+        summary="My KYC status (and what I'm allowed to do)",
+        description=(
+            "Returns the caller's tier, KYC status, attempt counters, latest submission summary and an `access` "
+            "object telling the frontend which features are unlocked.\n\n"
+            "**Deposits do not require KYC.** `access.can_deposit` is always `true`. Withdrawals, trading and "
+            "loan requests require an approved KYC (`access.can_withdraw`, `access.can_trade`, "
+            "`access.can_request_loan`)."
+            + docs.ACCESS_GUIDE
+        ),
         responses={
             200: success_response_doc("KYCStatusSuccess", "Current KYC status.", example=docs.STATUS_EXAMPLE),
             401: docs.UNAUTHENTICATED,
         },
+        examples=[
+            OpenApiExample("KYC approved", value=docs.STATUS_APPROVED_EXAMPLE, response_only=True),
+        ],
     )
     def get(self, request):
         summary = services.get_status_summary(request.user)
@@ -77,7 +87,10 @@ class SubmitView(APIView):
     @extend_schema(
         tags=[TAG],
         summary="Submit KYC",
-        description="Submits all five KYC sections in one request for manual review. Tier 1 users only.",
+        description=(
+            "Submits all five KYC sections in one request for manual review. Tier 1 users only. "
+            "KYC is **not** needed to deposit; it unlocks withdrawals, trading and loans."
+        ),
         request=SubmitKYCSerializer,
         examples=[OpenApiExample("Valid request", value=docs.SUBMIT_REQUEST_EXAMPLE, request_only=True)],
         responses={

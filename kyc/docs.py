@@ -2,6 +2,42 @@
 from drf_spectacular.utils import OpenApiExample, OpenApiResponse, inline_serializer
 from rest_framework import serializers
 
+# ---------------------------------------------------------------------------
+# Frontend guide: what KYC unlocks (rendered as markdown in Swagger on GET /kyc/status/)
+# ---------------------------------------------------------------------------
+ACCESS_GUIDE = """
+
+---
+### Frontend notes: what a user can do before / after KYC
+
+**What changed:** KYC is **no longer required to deposit**. A user can deposit as soon as they have registered and verified their email. KYC is still required for everything else.
+
+| Feature | Registered, no KYC (Tier 1) | KYC approved (Tier 2) |
+|---|---|---|
+| Create / list / cancel deposits | ✅ | ✅ |
+| View wallet, ledger, wallet config | ✅ | ✅ |
+| Withdraw (`POST /wallet/withdrawals/`) | ❌ `403 kyc_required` | ✅ |
+| Open trades (`POST /trades/`) | ❌ `403 kyc_required` | ✅ |
+| Request a loan (`POST /loans/`) | ❌ `403 kyc_required` | ✅ |
+
+**Use `data.access` from this endpoint to drive the UI.** Do not re-derive it from `tier`:
+
+```json
+"access": {
+  "can_deposit": true,
+  "can_withdraw": false,
+  "can_trade": false,
+  "can_request_loan": false
+}
+```
+
+- `can_deposit` is always `true` for a logged-in user. Remove any "complete KYC to deposit" gate or banner on the Deposit page.
+- When `can_withdraw` / `can_trade` / `can_request_loan` is `false`, keep the buttons visible but **disabled (or redirect)** with a prompt such as *"Verify your identity to unlock withdrawals"* that links to the KYC form. Branch the wording on `kyc_status` (`not_submitted`, `pending`, `rejected`, `approved`).
+- A Tier 1 user **can have a real balance** (from completed deposits). Show it normally. They just cannot withdraw or trade it until KYC is approved. Make that clear to avoid support tickets.
+- Still handle `403 kyc_required` on the gated endpoints (the token can be stale), and treat it as "send the user to KYC".
+- Refetch `GET /kyc/status/` after login, after submitting KYC, and when the dashboard loads. There is no push when an admin approves.
+"""
+
 SUBMIT_REQUEST_EXAMPLE = {
     "personal": {
         "full_name": "John Doe", "date_of_birth": "1995-04-12", "nationality": "NG",
@@ -63,10 +99,30 @@ STATUS_EXAMPLE = {
     "data": {
         "tier": 1, "kyc_status": "rejected", "can_submit": True,
         "attempts_used": 1, "attempts_remaining": 4,
+        "access": {
+            "can_deposit": True, "can_withdraw": False, "can_trade": False, "can_request_loan": False,
+        },
         "latest_submission": {
             "id": "3f6c1c0e-5b7e-4f0a-9d0b-0c6e8f7a1a11", "status": "rejected", "attempt_number": 1,
             "submitted_at": "2026-10-22T14:30:00Z", "reviewed_at": "2026-10-23T09:00:00Z",
             "rejection_reason": "ID number does not match the name provided.",
+        },
+    },
+}
+
+STATUS_APPROVED_EXAMPLE = {
+    "success": True,
+    "message": "Success",
+    "data": {
+        "tier": 2, "kyc_status": "approved", "can_submit": False,
+        "attempts_used": 1, "attempts_remaining": 4,
+        "access": {
+            "can_deposit": True, "can_withdraw": True, "can_trade": True, "can_request_loan": True,
+        },
+        "latest_submission": {
+            "id": "3f6c1c0e-5b7e-4f0a-9d0b-0c6e8f7a1a11", "status": "approved", "attempt_number": 1,
+            "submitted_at": "2026-10-22T14:30:00Z", "reviewed_at": "2026-10-23T09:00:00Z",
+            "rejection_reason": None,
         },
     },
 }
