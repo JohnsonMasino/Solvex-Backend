@@ -3,6 +3,42 @@ from drf_spectacular.utils import OpenApiExample, OpenApiResponse, inline_serial
 from rest_framework import serializers
 
 # ---------------------------------------------------------------------------
+# Frontend guide: who can do what (KYC access rules)
+# ---------------------------------------------------------------------------
+ACCESS_GUIDE = """
+
+---
+### Frontend notes: KYC and feature access
+
+**Deposits do not require KYC.** A user who has registered and verified their email can create deposits straight away, before submitting any identity documents. Everything else still requires approved KYC.
+
+| Feature | Needs verified email | Needs approved KYC |
+|---|---|---|
+| View wallet, config, ledger, deposit history | yes (logged in) | no |
+| **Create / cancel a deposit** | **yes** | **no** |
+| Create / confirm / cancel a withdrawal | yes | **yes** |
+| Open or close trades | yes | **yes** |
+| Request a loan | yes | **yes** |
+
+**Do not hard-code these rules in the frontend.** Call `GET /kyc/status/` and read the `access` object. It is the single source of truth for which buttons to show:
+
+```json
+"access": {
+  "can_deposit": true,
+  "can_withdraw": false,
+  "can_trade": false,
+  "can_request_loan": false
+}
+```
+
+- Show the **Deposit** button when `access.can_deposit` is `true`. This is true for every user with a verified email, whatever their KYC status.
+- For a non-KYC user, show Withdraw / Trade / Loan as locked and link them to the KYC page. Do not hide them silently, because the user needs to know why they are unavailable.
+- A user who has deposited but is not KYC-approved has a real balance, but cannot withdraw or trade it until KYC is approved. Say so on the wallet screen, for example "Complete identity verification to withdraw or trade."
+- Still handle `403 kyc_required` on withdrawal, trade and loan calls in case the user's status changed since the page loaded. Send the user to the KYC page.
+- Still handle `403 email_not_verified` on `POST /wallet/deposits/` and send the user to the email verification screen.
+"""
+
+# ---------------------------------------------------------------------------
 # Frontend guide: deposits (rendered as markdown in Swagger on the deposit + config endpoints)
 # ---------------------------------------------------------------------------
 LIVE_RATE_GUIDE = """
@@ -26,6 +62,7 @@ LIVE_RATE_GUIDE = """
    - `503 rate_unavailable`: the live rate couldn't be fetched. Show "Rate temporarily unavailable, please try again in a moment" and let the user retry. Do not treat it as a fatal error.
    - `400 deposit_below_minimum`: the minimum is checked in USD **at the live rate**, so an amount close to the minimum can flip between valid and invalid. Show the server message.
    - `400 validation_error` on `amount`: too many decimals for the asset (`decimals` in config: USDT 6, BTC 8, ETH 8) or above the per-request maximum.
+   - `403 email_not_verified`: the user hasn't verified their email yet. Send them to the verification screen. (KYC is **not** checked on deposits.)
 6. The amount the user must send is `data.amount` in `data.asset` on `data.network`. The crypto amount is fixed. Only the USD credited depends on the rate.
 7. `rate` at the top level of the config response is **deprecated** (USDT only). Use `networks[].rate`.
 """
@@ -37,6 +74,8 @@ WITHDRAWAL_FEE_GUIDE = """
 
 ---
 ### Frontend notes: withdrawal fee & live USDT rate
+
+**Withdrawals require approved KYC.** Users who haven't been approved get `403 kyc_required`. Use `access.can_withdraw` from `GET /kyc/status/` to decide whether to show the withdrawal form or a "Complete verification" prompt.
 
 **What changed**
 - Every withdrawal now carries a **fee** (`withdrawal_fee_percent` in the wallet config, currently **1.5%**). The fee is **added on top** of the amount the user wants to receive.
@@ -79,6 +118,7 @@ Example: the user enters `100.00` with a 1.5% fee. They receive `100.00` USD wor
 4. *Admin marks it failed (`status: failed`):* the **whole** `total_usd` is released back to `available_balance`. **No fee is charged** on failed, cancelled or expired withdrawals.
 
 **Errors to handle**
+- `403 kyc_required` on `POST /wallet/withdrawals/`: the user's KYC isn't approved. Send them to the KYC page.
 - `503 rate_unavailable` on `POST /wallet/withdrawals/`: the live rate couldn't be fetched. Show "Rate temporarily unavailable, please try again in a moment" and allow a retry.
 - `400 withdrawal_below_minimum`: `usd_amount` is below `min_withdrawal_usd`.
 - `400 insufficient_balance` / `400 funds_in_use`: the **total including the fee** doesn't fit. `data` contains the balances plus `total_usd` (what was needed). Show e.g. "You need $101.50 (amount + $1.50 fee) but only $90.00 is available."
@@ -123,6 +163,10 @@ UNAUTH = wallet_error(
     "Missing, invalid or expired access token.",
     {"code": "not_authenticated", "message": "Authentication credentials were not provided."},
     {"code": "token_not_valid", "message": "Given token not valid for any token type."},
+)
+EMAIL_NOT_VERIFIED = wallet_error(
+    "The user's email address is not verified yet. (KYC is not required for deposits.)",
+    {"code": "email_not_verified", "message": "Please verify your email address to continue."},
 )
 KYC_REQUIRED = wallet_error(
     "Identity verification (KYC) is not approved.",
@@ -293,4 +337,3 @@ TRANSACTIONS_EXAMPLE = {
 }
 
 CRON_EXAMPLE = {"success": True, "message": "Expired pending withdrawals.", "data": {"expired_withdrawals": 3}}
-
