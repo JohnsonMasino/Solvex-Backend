@@ -24,6 +24,7 @@ urlpatterns = [
     path("api/loans/", include("loan.urls")),
     path("api/referrals/", include("referral.urls")),
     path("api/trades/", include("trade.urls")),
+    path("api/signals/", include("signals.urls")),
 
     # Cron (each app owns its cron_urls.py)
     path("api/cron/auth/", include("authentication.cron_urls")),

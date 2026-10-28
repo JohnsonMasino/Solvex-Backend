@@ -50,6 +50,7 @@ INSTALLED_APPS = [
     "referral",
     "trade",
     "loan",
+    "signals",
 ]
 
 MIDDLEWARE = [
@@ -154,7 +155,7 @@ SPECTACULAR_SETTINGS = {
     "COMPONENT_SPLIT_REQUEST": True,
     "SECURITY": [{"jwtAuth": []}],
     "TAGS": [{"name": n} for n in
-             ["System", "Authentication", "Profile", "KYC", "Wallet", "Referral", "Trade", "Cron", "Loan"]],
+             ["System", "Authentication", "Profile", "KYC", "Wallet", "Referral", "Trade", "Cron", "Loan", "Signals"]],
 }
 
 # --------------------------------------------------------------------------- email (Mailgun)
@@ -267,6 +268,8 @@ JAZZMIN_SETTINGS = {
         "investment":           "fas fa-chart-line",
         "management":           "fas fa-cogs",
         "auth.Group":           "fas fa-layer-group",
+        "signals":                "fas fa-satellite-dish",
+        "signals.EligibleEmail":  "fas fa-envelope-open-text",
     },
     "default_icon_parents":  "fas fa-chevron-circle-right",
     "default_icon_children": "fas fa-circle",
