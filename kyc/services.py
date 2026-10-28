@@ -6,6 +6,14 @@ kyc/services.py - ALL business logic + the public cross-app contract:
     reject_submission(submission, admin_user, reason) -> None
 
 This app is the ONLY writer of user.tier and user.kyc_status.
+
+Access model
+------------
+* Tier 1 (registered, KYC not approved): may DEPOSIT only.
+* Tier 2 (KYC approved): deposit, withdraw, trade and request loans.
+`get_status_summary()["access"]` exposes this so the frontend can show/hide features
+from a single source of truth. The real enforcement is on the endpoints themselves
+(`IsKYCApproved` on withdrawals, trades and loan requests).
 """
 import ipaddress
 import logging
@@ -54,6 +62,17 @@ def get_form_options() -> dict:
     }
 
 
+def get_access(user) -> dict:
+    """What the user may do right now. Deposits never need KYC; everything else does."""
+    approved = user.kyc_status == KYCStatus.APPROVED
+    return {
+        "can_deposit": True,
+        "can_withdraw": approved,
+        "can_trade": approved,
+        "can_request_loan": approved,
+    }
+
+
 def get_status_summary(user) -> dict:
     used = KYCSubmission.objects.filter(user=user).count()
     latest = KYCSubmission.objects.filter(user=user).order_by("-attempt_number", "-created_at").first()
@@ -65,6 +84,7 @@ def get_status_summary(user) -> dict:
         "can_submit": can_submit,
         "attempts_used": used,
         "attempts_remaining": remaining,
+        "access": get_access(user),
         "latest": latest,
     }
 

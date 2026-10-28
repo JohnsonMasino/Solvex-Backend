@@ -208,9 +208,10 @@ KYC_POLICY_VERSION = os.environ.get("KYC_POLICY_VERSION", "1.0")
 
 
 # --------------------------------------------------------------------------- loan
+# NOTE: there is no balance gate any more (LOAN_MAX_ELIGIBLE_BALANCE was removed).
+# Any KYC-approved user without an open loan can request a loan.
 LOAN_MIN_AMOUNT = config("LOAN_MIN_AMOUNT", default="10.00", cast=Decimal)
 LOAN_MAX_AMOUNT = config("LOAN_MAX_AMOUNT", default="10000.00", cast=Decimal)
-LOAN_MAX_ELIGIBLE_BALANCE = config("LOAN_MAX_ELIGIBLE_BALANCE", default="50.00", cast=Decimal)  # must be BELOW this
 LOAN_DAILY_INTEREST_PERCENT = config("LOAN_DAILY_INTEREST_PERCENT", default="0.20", cast=Decimal)
 LOAN_OVERDUE_INTEREST_PERCENT = config("LOAN_OVERDUE_INTEREST_PERCENT", default="1.00", cast=Decimal)
 # False: on approval the principal is recorded as debt only (wallet.balance untouched).

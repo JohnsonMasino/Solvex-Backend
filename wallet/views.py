@@ -6,7 +6,7 @@ from rest_framework.views import APIView
 from core.exceptions import BusinessError
 from core.openapi import success_response_doc
 from core.pagination import StandardPagination
-from core.permissions import HasCronSecret, IsKYCApproved
+from core.permissions import HasCronSecret, IsEmailVerified, IsKYCApproved
 from core.responses import success_response
 from core.throttles import WithdrawalThrottle
 
@@ -47,7 +47,9 @@ class WalletSummaryView(APIView):
     @extend_schema(
         tags=[TAG], summary="Wallet summary",
         description=(
-            "Returns the caller's USD balance buckets. Tier 1 users see zeros.\n\n"
+            "Returns the caller's USD balance buckets. Available to every logged-in user, with or without KYC. "
+            "A user who has not completed KYC sees zeros until their first deposit is approved; after that the "
+            "balance is real, but it can only be withdrawn or traded once KYC is approved.\n\n"
             "- `balance`: total funds.\n"
             "- `net_balance`: `balance - loan_outstanding`\n"
             "- `loan_outstanding`: total amount owed on active loans.\n"
@@ -55,7 +57,7 @@ class WalletSummaryView(APIView):
             "- `pending_withdrawal_balance`: funds reserved by confirmed withdrawals awaiting admin processing "
             "(**amount + fee**).\n"
             "- `available_balance`: `balance - locked_balance - pending_withdrawal_balance`. Only this can be "
-            "traded or withdrawn."
+            "traded or withdrawn (and only by KYC-approved users)."
         ),
         responses={
             200: success_response_doc("WalletSummarySuccess", "Wallet balances.", example=docs.WALLET_EXAMPLE),
@@ -75,8 +77,9 @@ class WalletConfigView(APIView):
             "Returns the supported networks, deposit addresses, address regexes, minimums, the **live USD rate** "
             "for each network's asset (USDT / BTC / ETH) and the **withdrawal fee** (`withdrawal_fee_percent`, "
             "currently 1.5). Poll this endpoint every `rate_refresh_seconds` to keep the deposit and withdrawal "
-            "estimates current.\n\n"
-            "`withdrawal_enabled` is `true` only for USDT networks that currently have a live rate."
+            "estimates current. Available to every logged-in user, KYC or not.\n\n"
+            "`withdrawal_enabled` is `true` only for USDT networks that currently have a live rate. It says "
+            "nothing about the user's KYC status: check `access.can_withdraw` from `GET /kyc/status/` for that."
             + docs.LIVE_RATE_GUIDE
             + docs.WITHDRAWAL_FEE_GUIDE
         ),
@@ -95,7 +98,8 @@ class WalletConfigView(APIView):
 class DepositListCreateView(APIView):
     def get_permissions(self):
         if self.request.method == "POST":
-            return [IsAuthenticated(), IsKYCApproved()]
+            # Deposits do NOT require KYC. A verified email is enough.
+            return [IsAuthenticated(), IsEmailVerified()]
         return [IsAuthenticated()]
 
     @extend_schema(
@@ -125,10 +129,12 @@ class DepositListCreateView(APIView):
     @extend_schema(
         tags=[TAG], summary="Create deposit request",
         description=(
-            "Creates a deposit request (Tier 2 only) in USDT (`bep20`, `erc20`, `trc20`), BTC (`btc`) or ETH (`eth`). "
+            "Creates a deposit request in USDT (`bep20`, `erc20`, `trc20`), BTC (`btc`) or ETH (`eth`). "
+            "**KYC is NOT required**: any logged-in user with a verified email can deposit. "
             "The asset is decided by `network`. `amount` is in that asset's own units. The USD value is calculated "
             "from the **live market rate at the moment of this request** and frozen on the deposit. The company "
             "address is returned; funds are credited after admin confirmation."
+            + docs.ACCESS_GUIDE
             + docs.LIVE_RATE_GUIDE
         ),
         request=DepositCreateSerializer,
@@ -150,7 +156,7 @@ class DepositListCreateView(APIView):
                  "data": {"min_deposit_usd": "10.00"}},
             ),
             401: docs.UNAUTH,
-            403: docs.KYC_REQUIRED,
+            403: docs.EMAIL_NOT_VERIFIED,
             409: docs.wallet_error(
                 "Pending-deposit cap reached or duplicate transaction hash.",
                 {"code": "too_many_pending_deposits",
@@ -238,6 +244,7 @@ class DepositCancelView(APIView):
 class WithdrawalListCreateView(APIView):
     def get_permissions(self):
         if self.request.method == "POST":
+            # Withdrawals STILL require approved KYC.
             return [IsAuthenticated(), IsKYCApproved()]
         return [IsAuthenticated()]
 
@@ -276,7 +283,8 @@ class WithdrawalListCreateView(APIView):
     @extend_schema(
         tags=[TAG], summary="Start withdrawal",
         description=(
-            "Validates the request (Tier 2 only) and emails a one-time code. Funds are reserved only after the code "
+            "Validates the request (**KYC-approved users only**: Tier 1 users get `403 kyc_required`) and emails "
+            "a one-time code. Funds are reserved only after the code "
             "is confirmed. **Withdrawals are USDT only** (`bep20`, `erc20`, `trc20`); BTC / ETH networks are "
             "rejected (`withdrawal_enabled` is `false` for them in the wallet config).\n\n"
             "`usd_amount` is the USD value the user wants to **receive**. The server converts it to USDT at the "
@@ -555,4 +563,3 @@ class ExpirePendingWithdrawalsView(APIView):
     def post(self, request):
         count = services.expire_pending_withdrawals()
         return success_response({"expired_withdrawals": count}, message="Expired pending withdrawals.")
-
