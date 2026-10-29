@@ -1,6 +1,8 @@
 from drf_spectacular.utils import OpenApiExample, OpenApiParameter, extend_schema
 from rest_framework.generics import ListAPIView
+from rest_framework.parsers import MultiPartParser
 from rest_framework.permissions import IsAuthenticated
+from rest_framework.throttling import ScopedRateThrottle
 from rest_framework.views import APIView
 
 from core.exceptions import BusinessError
@@ -25,7 +27,10 @@ class OptionsView(APIView):
     @extend_schema(
         tags=[TAG],
         summary="KYC form options",
-        description="Returns every dropdown list needed to render the KYC form, each as a list of value/label pairs.",
+        description=(
+            "Returns every dropdown list needed to render the KYC form, each as a list of value/label pairs, "
+            "plus the image upload limits (`image_max_mb`, `image_formats`) for the profile photo and ID images."
+        ),
         responses={
             200: success_response_doc("KYCOptionsSuccess", "Form options returned.", example=docs.OPTIONS_EXAMPLE),
             401: docs.UNAUTHENTICATED,
@@ -42,12 +47,14 @@ class StatusView(APIView):
         tags=[TAG],
         summary="My KYC status (and what I'm allowed to do)",
         description=(
-            "Returns the caller's tier, KYC status, attempt counters, latest submission summary and an `access` "
-            "object telling the frontend which features are unlocked.\n\n"
+            "Returns the caller's tier, KYC status, attempt counters, latest submission summary, an `access` "
+            "object telling the frontend which features are unlocked, and `avatar_url` (the user's profile "
+            "picture, or `null`).\n\n"
             "**Deposits do not require KYC.** `access.can_deposit` is always `true`. Withdrawals, trading and "
             "loan requests require an approved KYC (`access.can_withdraw`, `access.can_trade`, "
             "`access.can_request_loan`)."
             + docs.ACCESS_GUIDE
+            + docs.AVATAR_GUIDE
         ),
         responses={
             200: success_response_doc("KYCStatusSuccess", "Current KYC status.", example=docs.STATUS_EXAMPLE),
@@ -82,17 +89,26 @@ class PrefillView(APIView):
 
 class SubmitView(APIView):
     permission_classes = [IsAuthenticated, IsEmailVerified]
-    throttle_classes = [AuthSensitiveThrottle]
+    # The project default is JSON only; this view accepts multipart because it carries the images.
+    parser_classes = [MultiPartParser]
+    # AuthSensitiveThrottle limits bursts; the "image_upload" scope (settings.py) limits uploads per hour.
+    throttle_classes = [AuthSensitiveThrottle, ScopedRateThrottle]
+    throttle_scope = "image_upload"
 
     @extend_schema(
         tags=[TAG],
-        summary="Submit KYC",
+        summary="Submit KYC (with profile photo and ID images)",
         description=(
-            "Submits all five KYC sections in one request for manual review. Tier 1 users only. "
-            "KYC is **not** needed to deposit; it unlocks withdrawals, trading and loans."
+            "Submits all five KYC sections **and three images** in one request for manual review. "
+            "Tier 1 users only. KYC is **not** needed to deposit; it unlocks withdrawals, trading and loans.\n\n"
+            "Send **`multipart/form-data`**. The sections use dotted keys (`personal.full_name`, "
+            "`address.line1`, ...) and the files use the top-level fields **`profile_photo`**, **`id_front`** "
+            "and **`id_back`**. All three images are required. JPG, PNG, WEBP or HEIC, max `image_max_mb` MB each "
+            "(default 5); the type is checked on the server from the real file content.\n\n"
+            "The images are locked once submitted. After a rejection the user submits again with a new set."
+            + docs.IMAGES_GUIDE
         ),
-        request=SubmitKYCSerializer,
-        examples=[OpenApiExample("Valid request", value=docs.SUBMIT_REQUEST_EXAMPLE, request_only=True)],
+        request={"multipart/form-data": docs.SUBMIT_MULTIPART_DOC},
         responses={
             201: success_response_doc(
                 "KYCSubmitSuccess", "KYC submitted and queued for review.",
@@ -100,13 +116,22 @@ class SubmitView(APIView):
                 message="KYC submitted. We'll review it and email you the outcome.",
             ),
             400: docs.kyc_error(
-                "One or more fields are invalid. Errors are keyed by dotted path.",
+                "One or more fields or images are invalid. Errors are keyed by dotted path (images by field name).",
                 {
                     "code": "validation_error",
                     "message": "Please correct the highlighted fields.",
                     "errors": {
                         "personal.date_of_birth": ["You must be at least 18 years old."],
                         "consent.accuracy_declaration": ["You must confirm that the information provided is accurate."],
+                    },
+                },
+                {
+                    "code": "validation_error",
+                    "message": "Please correct the highlighted fields.",
+                    "errors": {
+                        "profile_photo": ["Please upload a profile photo."],
+                        "id_front": ["The image is too large. The maximum size is 5 MB."],
+                        "id_back": ["Upload a JPG, PNG, WEBP or HEIC image."],
                     },
                 },
             ),
@@ -129,9 +154,22 @@ class SubmitView(APIView):
                 {"code": "id_already_used",
                  "message": "This identification document can't be used. Please check the details or contact support."},
             ),
+            415: docs.kyc_error(
+                "The request was not sent as multipart/form-data (for example JSON).",
+                {"code": "unsupported_media_type", "message": "Unsupported media type \"application/json\" in request."},
+            ),
             429: docs.kyc_error(
                 "Too many requests.",
                 {"code": "throttled", "message": "Request was throttled.", "data": {"retry_after_seconds": 42}},
+            ),
+            502: docs.kyc_error(
+                "The image host rejected or failed the upload. Nothing was saved; the user can try again.",
+                {"code": "upload_failed", "message": "We couldn't upload your image. Please try again."},
+            ),
+            503: docs.kyc_error(
+                "Image uploads are not configured on the server.",
+                {"code": "upload_unavailable",
+                 "message": "Image uploads are temporarily unavailable. Please try again later."},
             ),
         },
     )
@@ -152,7 +190,11 @@ class SubmissionDetailView(APIView):
     @extend_schema(
         tags=[TAG],
         summary="My latest submission",
-        description="Read-only view of the caller's latest submission with the ID number masked.",
+        description=(
+            "Read-only view of the caller's latest submission with the ID number masked. "
+            "Includes an `images` object with the profile photo and the front/back ID image URLs."
+            + docs.DETAIL_IMAGES_GUIDE
+        ),
         responses={
             200: success_response_doc("KYCSubmissionSuccess", "Latest submission.", example=docs.DETAIL_EXAMPLE),
             401: docs.UNAUTHENTICATED,
