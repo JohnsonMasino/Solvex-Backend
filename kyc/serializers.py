@@ -1,5 +1,9 @@
 from rest_framework import serializers
 
+from core import images
+from core.exceptions import BusinessError
+
+from . import services
 from . import validators as v
 from .models import (
     AddressEntryMethod, AnnualIncomeRange, EmploymentStatus, ExpectedAnnualVolume,
@@ -27,6 +31,41 @@ def _flatten_errors(detail, prefix=""):
     else:
         out[prefix or "non_field_errors"] = [str(detail)]
     return out
+
+
+# --------------------------------------------------------------------------- #
+# Image field check
+# --------------------------------------------------------------------------- #
+def _check_image(file):
+    """
+    Checks the REAL file content (type, size) so the error is attached to the right field,
+    e.g. {"id_front": ["The image is too large. The maximum size is 5 MB."]}.
+    The file is rewound afterwards because the service reads it again before uploading.
+    """
+    try:
+        file.seek(0)
+        images.read_and_validate(file)
+    except BusinessError as exc:
+        raise serializers.ValidationError(getattr(exc, "message", None) or str(exc))
+    finally:
+        try:
+            file.seek(0)
+        except Exception:
+            pass
+    return file
+
+
+def _image_field(label):
+    return serializers.FileField(
+        allow_empty_file=False,
+        error_messages={
+            "required": f"Please upload {label}.",
+            "null": f"Please upload {label}.",
+            "empty": "The selected file is empty.",
+            "invalid": "Upload the image as a file (multipart/form-data).",
+            "no_name": "The selected file has no name.",
+        },
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -115,11 +154,30 @@ class ConsentSerializer(serializers.Serializer):
 
 
 class SubmitKYCSerializer(serializers.Serializer):
+    """
+    Sent as multipart/form-data. The five sections use dotted keys (personal.full_name,
+    address.line1, ...); the three images are top-level file fields.
+    """
     personal = PersonalSerializer()
     address = AddressSerializer()
     identification = IdentificationSerializer()
     employment = EmploymentSerializer()
     consent = ConsentSerializer()
+
+    # All three are required. To make the profile photo optional, use
+    # `serializers.FileField(required=False, ...)` and skip it in services.submit_kyc.
+    profile_photo = _image_field("a profile photo")
+    id_front = _image_field("the front of your ID document")
+    id_back = _image_field("the back of your ID document")
+
+    def validate_profile_photo(self, value):
+        return _check_image(value)
+
+    def validate_id_front(self, value):
+        return _check_image(value)
+
+    def validate_id_back(self, value):
+        return _check_image(value)
 
     def run_validation(self, data=serializers.empty):
         try:
@@ -150,10 +208,14 @@ class SubmissionSummarySerializer(serializers.ModelSerializer):
 class SubmissionCreatedSerializer(SubmissionSummarySerializer):
     id_type = serializers.CharField(read_only=True)
     id_number = serializers.CharField(source="masked_id_number", read_only=True)
+    images = serializers.SerializerMethodField()
 
     class Meta(SubmissionSummarySerializer.Meta):
-        fields = SubmissionSummarySerializer.Meta.fields + ("id_type", "id_number")
+        fields = SubmissionSummarySerializer.Meta.fields + ("id_type", "id_number", "images")
         read_only_fields = fields
+
+    def get_images(self, obj):
+        return services.get_submission_images(obj)
 
 
 class SubmissionDetailSerializer(serializers.BaseSerializer):
@@ -185,6 +247,7 @@ class SubmissionDetailSerializer(serializers.BaseSerializer):
                 "entry_method": s.address_entry_method,
             },
             "identification": {"id_type": s.id_type, "id_number": s.masked_id_number},
+            "images": services.get_submission_images(s),
             "employment": {
                 "employment_status": s.employment_status,
                 "source_of_income": s.source_of_income,

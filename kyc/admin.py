@@ -1,5 +1,6 @@
 from django.contrib import admin, messages
 from django.utils import timezone
+from django.utils.html import format_html
 
 from core.exceptions import BusinessError
 
@@ -7,6 +8,9 @@ from . import services
 from .models import KYCStatus, KYCSubmission
 
 EDITABLE_FIELDS = ("status", "rejection_reason", "admin_note")
+
+# Read-only preview columns / fields (they are NOT model fields, so they are added to readonly_fields by hand)
+PREVIEW_FIELDS = ("profile_photo_preview", "id_front_preview", "id_back_preview")
 
 
 def _err_text(exc):
@@ -16,7 +20,7 @@ def _err_text(exc):
 @admin.register(KYCSubmission)
 class KYCSubmissionAdmin(admin.ModelAdmin):
     list_display = (
-        "user_email", "full_name", "status", "id_type", "nationality",
+        "photo_thumb", "user_email", "full_name", "status", "id_type", "nationality",
         "attempt_number", "created_at", "reviewed_at",
     )
     list_filter = ("status", "nationality", "id_type", "created_at")
@@ -30,6 +34,9 @@ class KYCSubmissionAdmin(admin.ModelAdmin):
         ("Review", {"fields": (
             "user_email", "attempt_number", "status", "rejection_reason", "admin_note",
             "reviewed_by", "reviewed_at",
+        )}),
+        ("Photos & ID images", {"fields": (
+            "profile_photo_preview", "id_front_preview", "id_back_preview",
         )}),
         ("Personal Biodata", {"fields": (
             "full_name", "date_of_birth", "nationality", "sex", "phone_number",
@@ -55,6 +62,60 @@ class KYCSubmissionAdmin(admin.ModelAdmin):
     def user_email(self, obj):
         return obj.user.email
 
+    @staticmethod
+    def _image_html(public_id, *, private, max_w, max_h, **transform):
+        """
+        <img> that opens the full image in a new tab.
+        Private images (ID front/back) use signed URLs built when the page is rendered.
+        """
+        if not public_id:
+            return "—"
+        url = services.get_image_url(public_id, private=private, **transform)
+        if not url:
+            return "Image unavailable (check the Cloudinary settings)"
+        return format_html(
+            '<a href="{url}" target="_blank" rel="noopener noreferrer">'
+            '<img src="{url}" alt="" style="max-width:{w}px;max-height:{h}px;'
+            'border-radius:6px;border:1px solid #ccc;object-fit:contain;background:#f6f6f6"></a>'
+            '<div style="margin-top:4px;font-size:11px;color:#777">Click to open full size</div>',
+            url=url, w=max_w, h=max_h,
+        )
+
+    @admin.display(description="Photo")
+    def photo_thumb(self, obj):
+        if not obj.profile_photo_public_id:
+            return "—"
+        url = services.get_image_url(
+            obj.profile_photo_public_id, private=services.PROFILE_PHOTO_PRIVATE,
+            width=64, height=64, crop="fill", gravity="face",
+        )
+        if not url:
+            return "—"
+        return format_html(
+            '<img src="{}" alt="" style="width:36px;height:36px;border-radius:50%;object-fit:cover">', url
+        )
+
+    @admin.display(description="Profile photo")
+    def profile_photo_preview(self, obj):
+        if obj is None:
+            return "—"
+        return self._image_html(
+            obj.profile_photo_public_id, private=services.PROFILE_PHOTO_PRIVATE,
+            max_w=260, max_h=260, width=520, height=520, crop="fill", gravity="face",
+        )
+
+    @admin.display(description="ID document: front")
+    def id_front_preview(self, obj):
+        if obj is None:
+            return "—"
+        return self._image_html(obj.id_front_public_id, private=services.ID_IMAGE_PRIVATE, max_w=480, max_h=340)
+
+    @admin.display(description="ID document: back")
+    def id_back_preview(self, obj):
+        if obj is None:
+            return "—"
+        return self._image_html(obj.id_back_public_id, private=services.ID_IMAGE_PRIVATE, max_w=480, max_h=340)
+
     # ---- permissions ------------------------------------------------------
     def has_add_permission(self, request):
         return False
@@ -63,8 +124,11 @@ class KYCSubmissionAdmin(admin.ModelAdmin):
         return False
 
     def get_readonly_fields(self, request, obj=None):
+        # Every model field except the three review fields is read-only. That includes the
+        # three *_public_id fields, so the images are locked and cannot be swapped in the admin.
         readonly = [f.name for f in self.model._meta.fields if f.name not in EDITABLE_FIELDS]
         readonly.append("user_email")
+        readonly += list(PREVIEW_FIELDS)
         # Once a submission is final only the internal note stays editable.
         if obj is not None and obj.status != KYCStatus.PENDING:
             readonly += ["status", "rejection_reason"]
