@@ -117,6 +117,8 @@ STORAGES = {
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 
 # --------------------------------------------------------------------------- DRF / JWT / OpenAPI
+# NOTE: the default parser is JSON only. Image upload views opt in to multipart with
+# `parser_classes = [MultiPartParser]` on the view itself, so every other endpoint stays JSON-only.
 REST_FRAMEWORK = {
     "DEFAULT_AUTHENTICATION_CLASSES": ["rest_framework_simplejwt.authentication.JWTAuthentication"],
     "DEFAULT_PERMISSION_CLASSES": ["rest_framework.permissions.IsAuthenticated"],
@@ -135,6 +137,7 @@ REST_FRAMEWORK = {
         "auth_sensitive": "10/min",  # register, login, otp, reset
         "otp_send": "5/hour",
         "withdrawal": "10/hour",
+        "image_upload": "30/hour",  # any endpoint that uploads an image (scope: image_upload)
     },
 }
 
@@ -224,6 +227,37 @@ FRONTEND_DEPOSIT_PATH = config("FRONTEND_DEPOSIT_PATH", default="/dashboard/depo
 
 
 BACKEND_URL = config("BACKEND_URL", default="")
+
+
+# --------------------------------------------------------------------------- images (Cloudinary)
+# Get these from the Cloudinary console (Settings > API Keys). Easiest is the single
+# "API environment variable":   CLOUDINARY_URL=cloudinary://<api_key>:<api_secret>@<cloud_name>
+# Alternatively set the three separate variables below. Both styles work.
+# python-decouple only reads the .env file, it does NOT export to os.environ, and the Cloudinary SDK
+# reads os.environ when it is first imported, so we export CLOUDINARY_URL ourselves BEFORE the import.
+CLOUDINARY_URL = config("CLOUDINARY_URL", default="").strip()
+CLOUDINARY_CLOUD_NAME = config("CLOUDINARY_CLOUD_NAME", default="").strip()
+CLOUDINARY_API_KEY = config("CLOUDINARY_API_KEY", default="").strip()
+CLOUDINARY_API_SECRET = config("CLOUDINARY_API_SECRET", default="").strip()
+
+if CLOUDINARY_URL:
+    os.environ["CLOUDINARY_URL"] = CLOUDINARY_URL
+
+import cloudinary  # noqa: E402  (must come after the os.environ line above)
+
+cloudinary.config(
+    secure=True,
+    # Only pass values that were really provided, so the CLOUDINARY_URL values are never overwritten by blanks.
+    **{k: v for k, v in {
+        "cloud_name": CLOUDINARY_CLOUD_NAME,
+        "api_key": CLOUDINARY_API_KEY,
+        "api_secret": CLOUDINARY_API_SECRET,
+    }.items() if v},
+)
+
+CLOUDINARY_FOLDER_ROOT = config("CLOUDINARY_FOLDER_ROOT", default="solvexmarketinc").strip().strip("/")
+CLOUDINARY_UPLOAD_TIMEOUT = config("CLOUDINARY_UPLOAD_TIMEOUT", default=60, cast=int)  # seconds
+IMAGE_UPLOAD_MAX_MB = config("IMAGE_UPLOAD_MAX_MB", default=5, cast=int)               # per image
 
 
 # --------------------------------------------------------------------------- production hardening

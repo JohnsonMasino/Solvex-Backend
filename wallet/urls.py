@@ -3,7 +3,7 @@ from django.urls import path
 from .views import (
     DepositCancelView, DepositDetailView, DepositListCreateView, TransactionListView,
     WalletConfigView, WalletSummaryView, WithdrawalCancelView, WithdrawalConfirmView,
-    WithdrawalDetailView, WithdrawalListCreateView, WithdrawalResendOTPView,
+    WithdrawalDetailView, WithdrawalListCreateView, WithdrawalResendOTPView, DepositScreenshotView, DepositPaidView,
 )
 
 app_name = "wallet"
@@ -20,4 +20,6 @@ urlpatterns = [
     path("withdrawals/<uuid:pk>/resend-otp/", WithdrawalResendOTPView.as_view(), name="withdrawal-resend-otp"),
     path("withdrawals/<uuid:pk>/cancel/", WithdrawalCancelView.as_view(), name="withdrawal-cancel"),
     path("transactions/", TransactionListView.as_view(), name="transactions"),
+    path("deposits/<uuid:pk>/screenshot/", DepositScreenshotView.as_view(), name="deposit-screenshot"),
+    path("deposits/<uuid:pk>/paid/", DepositPaidView.as_view(), name="deposit-paid"),
 ]

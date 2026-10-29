@@ -1,8 +1,11 @@
 import re
 from decimal import Decimal
+from typing import Optional
 
 from django.conf import settings
 from rest_framework import serializers
+
+from core import images
 
 from .models import (
     ASSET_DECIMALS, NETWORK_ASSET, WITHDRAWAL_NETWORK_CHOICES,
@@ -82,6 +85,23 @@ class DepositCreateSerializer(serializers.Serializer):
         attrs["amount"] = amount
         attrs.pop("usdt_amount", None)  # the legacy alias is folded into `amount`
         return attrs
+
+
+class DepositScreenshotSerializer(serializers.Serializer):
+    """multipart/form-data body of POST /wallet/deposits/{id}/screenshot/.
+
+    Only presence is checked here. Size and the REAL file type (magic bytes, not the extension) are
+    checked in core.images.read_and_validate so the rules live in one place."""
+
+    screenshot = serializers.FileField(
+        allow_empty_file=False,
+        use_url=False,
+        error_messages={
+            "required": "Please choose a screenshot of your payment.",
+            "invalid": "Upload the screenshot as a file (multipart/form-data, field name 'screenshot').",
+            "empty": "The uploaded file is empty.",
+        },
+    )
 
 
 class WithdrawalCreateSerializer(serializers.Serializer):
@@ -165,18 +185,33 @@ class WalletSerializer(serializers.ModelSerializer):
 class DepositSerializer(serializers.ModelSerializer):
     # Shows the admin-chosen transaction time when one was set, otherwise the real creation time.
     created_at = serializers.SerializerMethodField()
+    # Payment proof. URLs are signed Cloudinary URLs generated on the fly (nothing is stored but the id).
+    has_screenshot = serializers.SerializerMethodField()
+    screenshot_url = serializers.SerializerMethodField()
+    screenshot_thumbnail_url = serializers.SerializerMethodField()
 
     class Meta:
         model = Deposit
         fields = (
             "id", "reference", "network", "asset", "amount", "usd_amount", "rate",
             "deposit_address", "tx_hash", "status", "decline_reason",
+            "has_screenshot", "screenshot_url", "screenshot_thumbnail_url",
+            "screenshot_uploaded_at", "paid_at",
             "created_at", "processed_at",
         )
         read_only_fields = fields
 
     def get_created_at(self, obj) -> str:
         return _effective_created_at(obj)
+
+    def get_has_screenshot(self, obj) -> bool:
+        return obj.has_screenshot
+
+    def get_screenshot_url(self, obj) -> Optional[str]:
+        return images.image_url(obj.screenshot_public_id, fetch_format="auto") if obj.has_screenshot else None
+
+    def get_screenshot_thumbnail_url(self, obj) -> Optional[str]:
+        return images.thumbnail_url(obj.screenshot_public_id) if obj.has_screenshot else None
 
     def to_representation(self, instance):
         data = super().to_representation(instance)

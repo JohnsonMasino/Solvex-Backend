@@ -252,6 +252,19 @@ class Deposit(UUIDModel, TimeStampedModel):
     status = models.CharField(max_length=10, choices=DepositStatus.choices, default=DepositStatus.PENDING, db_index=True)
     decline_reason = models.TextField(blank=True)
     admin_note = models.TextField(blank=True)
+
+    # ---- payment proof (Cloudinary). Only the public_id is stored; URLs are generated on demand
+    # (signed, because the image is uploaded as a private "authenticated" asset). See core/images.py.
+    screenshot_public_id = models.CharField(
+        max_length=255, blank=True,
+        help_text="Cloudinary public_id of the payment screenshot uploaded by the user.",
+    )
+    screenshot_uploaded_at = models.DateTimeField(null=True, blank=True)
+    paid_at = models.DateTimeField(
+        null=True, blank=True,
+        help_text="When the user clicked 'I have paid'. Once set, the screenshot can no longer be changed.",
+    )
+
     transaction_at = models.DateTimeField(
         null=True, blank=True,
         help_text="Admin override of the transaction date/time. Leave as shown to keep the actual time.",
@@ -280,6 +293,10 @@ class Deposit(UUIDModel, TimeStampedModel):
     def effective_at(self):
         """The date/time shown to the user: the admin override if set, else the real creation time."""
         return self.transaction_at or self.created_at
+
+    @property
+    def has_screenshot(self) -> bool:
+        return bool(self.screenshot_public_id)
 
     @property
     def usdt_amount(self):
