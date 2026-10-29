@@ -16,6 +16,7 @@ ACCESS_GUIDE = """
 |---|---|---|
 | View wallet, config, ledger, deposit history | yes (logged in) | no |
 | **Create / cancel a deposit** | **yes** | **no** |
+| **Upload payment screenshot / click "I have paid"** | **yes** | **no** |
 | Create / confirm / cancel a withdrawal | yes | **yes** |
 | Open or close trades | yes | **yes** |
 | Request a loan | yes | **yes** |
@@ -65,6 +66,86 @@ LIVE_RATE_GUIDE = """
    - `403 email_not_verified`: the user hasn't verified their email yet. Send them to the verification screen. (KYC is **not** checked on deposits.)
 6. The amount the user must send is `data.amount` in `data.asset` on `data.network`. The crypto amount is fixed. Only the USD credited depends on the rate.
 7. `rate` at the top level of the config response is **deprecated** (USDT only). Use `networks[].rate`.
+"""
+
+# ---------------------------------------------------------------------------
+# Frontend guide: payment screenshot + "I have paid"
+# ---------------------------------------------------------------------------
+SCREENSHOT_GUIDE = """
+
+---
+### Frontend notes: payment screenshot & "I have paid"
+
+**What changed**
+- A deposit is now a **3-step flow**: (1) create the deposit, (2) upload a screenshot of the payment, (3) click **I have paid**.
+- Two new endpoints: `POST /wallet/deposits/{id}/screenshot/` and `POST /wallet/deposits/{id}/paid/`.
+- Deposit objects have new fields: `has_screenshot`, `screenshot_url`, `screenshot_thumbnail_url`, `screenshot_uploaded_at`, `paid_at`.
+- The wallet config has two new fields: `screenshot_max_mb` (default 5) and `screenshot_formats` (`jpg`, `png`, `webp`, `heic`). Use them for client-side checks.
+- The admin sees the screenshot on the deposit page in the admin console before approving or declining. A deposit **can still be approved without a screenshot**, but the client must not allow "I have paid" without one.
+
+**The flow**
+
+| Step | Call | Result |
+|---|---|---|
+| 1 | `POST /wallet/deposits/` (JSON, unchanged) | Deposit is `pending`. Show the company address and the exact amount. |
+| 2 | `POST /wallet/deposits/{id}/screenshot/` (**multipart/form-data**) | Image is stored. Response is the updated deposit with `has_screenshot: true` and the image URLs. Repeat to replace the image. |
+| 3 | `POST /wallet/deposits/{id}/paid/` (no body) | `paid_at` is set. The screenshot is now **locked**. The deposit waits for admin review. |
+
+**Uploading the screenshot (read carefully, this is the part people get wrong)**
+- Send **`multipart/form-data`** with **one file field named exactly `screenshot`**. This endpoint does **not** accept JSON or base64.
+- **Do NOT set the `Content-Type` header yourself.** The browser must generate it, because it contains the multipart boundary. With `fetch` or `axios`, pass a `FormData` object and leave `Content-Type` out. If you set it manually the upload fails with a validation error.
+- Always send the normal `Authorization: Bearer <access_token>` header.
+- Accepted formats: **JPG, PNG, WEBP, HEIC**. Maximum size: **`screenshot_max_mb`** (default 5 MB). The server checks the real file content, so renaming a PDF to `.jpg` is rejected.
+- On phones, `<input type="file" accept="image/*">` opens the gallery and camera. Resize or compress very large photos in the browser before uploading if you can.
+
+```js
+// 2. upload the screenshot
+const form = new FormData();
+form.append("screenshot", file);            // `file` comes from <input type="file" accept="image/*">
+
+const res = await fetch(`${API_URL}/wallet/deposits/${depositId}/screenshot/`, {
+  method: "POST",
+  headers: { Authorization: `Bearer ${accessToken}` },   // NO Content-Type here!
+  body: form,
+});
+const json = await res.json();               // json.data.screenshot_thumbnail_url -> show a preview
+
+// 3. "I have paid"
+await fetch(`${API_URL}/wallet/deposits/${depositId}/paid/`, {
+  method: "POST",
+  headers: { Authorization: `Bearer ${accessToken}` },
+});
+```
+
+```js
+// axios version
+const form = new FormData();
+form.append("screenshot", file);
+await axios.post(`/wallet/deposits/${depositId}/screenshot/`, form);   // do not set Content-Type
+```
+
+**UI rules**
+1. Keep the **I have paid** button disabled until the deposit has `has_screenshot: true`.
+2. After a successful upload show `screenshot_thumbnail_url` as a preview and a **Replace image** action. Show a spinner while uploading (can take a few seconds on mobile data) and disable the buttons to prevent double submits.
+3. Once `paid_at` is not `null`, hide the upload and replace controls and show "Payment submitted, waiting for confirmation". Clicking **I have paid** twice is safe (it returns the same deposit).
+4. **Image URLs are signed and private.** Use `screenshot_url` / `screenshot_thumbnail_url` exactly as returned. Do not edit them, build them yourself, or store them long term. Always read them fresh from the deposit.
+5. Resume support: on the deposit detail screen, if the deposit is `pending` with `has_screenshot: false`, show the upload step. If `has_screenshot: true` and `paid_at: null`, show the preview and the **I have paid** button. If `paid_at` is set, show the waiting state.
+
+**Errors to handle**
+
+| HTTP | `code` | Meaning / what to show |
+|---|---|---|
+| 400 | `validation_error` | No file in the `screenshot` field (usually a wrong field name or a manual `Content-Type`). |
+| 400 | `invalid_image` | Not a real JPG / PNG / WEBP / HEIC image, or empty. Show the server message. |
+| 400 | `image_too_large` | Above `screenshot_max_mb`. `data.max_mb` has the limit. |
+| 400 | `screenshot_required` | "I have paid" was called before uploading. Send the user back to the upload step. |
+| 403 | `email_not_verified` | Send the user to email verification. |
+| 404 | `not_found` | Unknown deposit id, or it belongs to another user. |
+| 409 | `conflict` | The deposit is no longer `pending` (completed, declined or cancelled). Refresh it. |
+| 409 | `deposit_already_paid` | Already marked as paid, so the screenshot is locked. |
+| 429 | `throttled` | Too many uploads (30 per hour). Honour `data.retry_after_seconds`. |
+| 502 | `upload_failed` | The image host failed. Let the user retry. |
+| 503 | `upload_unavailable` | Image uploads are not configured on the server right now. Let the user retry later. |
 """
 
 # ---------------------------------------------------------------------------
@@ -246,6 +327,8 @@ CONFIG_EXAMPLE = {
              "address_regex": "^0x[a-fA-F0-9]{40}$"},
         ],
         "withdrawal_request_expiry_minutes": 5,
+        "screenshot_max_mb": 5,
+        "screenshot_formats": ["jpg", "png", "webp", "heic"],
     },
 }
 
@@ -253,24 +336,46 @@ DEPOSIT_REQUEST = {"amount": "500", "network": "trc20", "tx_hash": "optional-tra
 DEPOSIT_REQUEST_BTC = {"amount": "0.005", "network": "btc", "tx_hash": "optional-transaction-id"}
 
 # `rate` and `usd_amount` are frozen at creation from the live rate at that moment.
+# Screenshot fields start empty and fill in after POST /wallet/deposits/{id}/screenshot/.
 DEPOSIT_DATA = {
     "id": "7b0f3c1e-2a4d-4e8f-9c11-5d6a7b8c9d01", "reference": "DEP-AB12CD34", "network": "trc20",
     "asset": "usdt", "amount": "500.00000000", "usd_amount": "500.10", "rate": "1.000200",
     "deposit_address": "TXyZ1234567890abcdefghijkmnopqrst", "tx_hash": None, "status": "pending",
-    "decline_reason": None, "created_at": "2026-10-22T14:30:00Z", "processed_at": None,
+    "decline_reason": None,
+    "has_screenshot": False, "screenshot_url": None, "screenshot_thumbnail_url": None,
+    "screenshot_uploaded_at": None, "paid_at": None,
+    "created_at": "2026-10-22T14:30:00Z", "processed_at": None,
+}
+# Same deposit after the screenshot was uploaded (URLs are signed Cloudinary URLs, example values only).
+DEPOSIT_WITH_SCREENSHOT_DATA = {
+    **DEPOSIT_DATA,
+    "has_screenshot": True,
+    "screenshot_url": "https://res.cloudinary.com/your-cloud/image/authenticated/s--Ab12Cd34--/f_auto/v1/solvexmarketinc/deposit_screenshots/42/9f8e7d6c5b4a.jpg",
+    "screenshot_thumbnail_url": "https://res.cloudinary.com/your-cloud/image/authenticated/s--Ef56Gh78--/c_limit,f_auto,q_auto,w_320/v1/solvexmarketinc/deposit_screenshots/42/9f8e7d6c5b4a.jpg",
+    "screenshot_uploaded_at": "2026-10-22T14:33:10Z",
 }
 DEPOSIT_CREATED_EXAMPLE = {
     "success": True,
     "message": "Deposit request created. Send exactly 500 USDT on the TRC20 network to the address shown.",
     "data": DEPOSIT_DATA,
 }
-DEPOSIT_DETAIL_EXAMPLE = {"success": True, "message": "Success", "data": DEPOSIT_DATA}
+DEPOSIT_DETAIL_EXAMPLE = {"success": True, "message": "Success", "data": DEPOSIT_WITH_SCREENSHOT_DATA}
+DEPOSIT_SCREENSHOT_EXAMPLE = {
+    "success": True,
+    "message": "Screenshot uploaded. Click 'I have paid' to submit your deposit.",
+    "data": DEPOSIT_WITH_SCREENSHOT_DATA,
+}
+DEPOSIT_PAID_EXAMPLE = {
+    "success": True,
+    "message": "Thanks! We've received your payment confirmation and will review it shortly.",
+    "data": {**DEPOSIT_WITH_SCREENSHOT_DATA, "paid_at": "2026-10-22T14:34:00Z"},
+}
 DEPOSIT_CANCELLED_EXAMPLE = {
     "success": True, "message": "Deposit cancelled.", "data": {**DEPOSIT_DATA, "status": "cancelled"},
 }
 DEPOSIT_LIST_EXAMPLE = {
     "success": True, "message": "Success",
-    "data": {"count": 1, "next": None, "previous": None, "results": [DEPOSIT_DATA]},
+    "data": {"count": 1, "next": None, "previous": None, "results": [DEPOSIT_WITH_SCREENSHOT_DATA]},
 }
 
 # `usd_amount` is what the user wants to RECEIVE. The 1.5% fee is added on top by the server.

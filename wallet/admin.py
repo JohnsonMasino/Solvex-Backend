@@ -10,6 +10,7 @@ from django.urls import reverse
 from django.utils import timezone
 from django.utils.html import format_html
 
+from core import images
 from core.exceptions import BusinessError
 
 from . import services
@@ -181,6 +182,30 @@ class WalletTransactionAdmin(ReadOnlyAdmin):
 # --------------------------------------------------------------------------- #
 # Deposits
 # --------------------------------------------------------------------------- #
+class DepositProofFilter(admin.SimpleListFilter):
+    """Quickly find deposits the user says they have paid, or that have no screenshot yet."""
+
+    title = "payment proof"
+    parameter_name = "proof"
+
+    def lookups(self, request, model_admin):
+        return [
+            ("paid", "Marked as paid by user"),
+            ("with", "Has screenshot"),
+            ("without", "No screenshot"),
+        ]
+
+    def queryset(self, request, queryset):
+        value = self.value()
+        if value == "paid":
+            return queryset.filter(paid_at__isnull=False)
+        if value == "with":
+            return queryset.exclude(screenshot_public_id="")
+        if value == "without":
+            return queryset.filter(screenshot_public_id="")
+        return queryset
+
+
 class DepositAdminForm(TransactionTimeForm):
     """Change form (any status)."""
 
@@ -231,8 +256,11 @@ class DepositAdmin(ManualAddMixin, admin.ModelAdmin):
     EDIT_KEYS = ("network", "amount", "rate", "usd_amount", "deposit_address", "tx_hash", "transaction_at")
     ALWAYS_EDITABLE = EDIT_KEYS + ("admin_note",)
 
-    list_display = ("reference", "user_email", "network", "asset", "amount", "usd_amount", "status", "effective_time")
-    list_filter = ("status", "asset", "network", "created_at")
+    list_display = (
+        "reference", "user_email", "network", "asset", "amount", "usd_amount", "status",
+        "has_proof", "user_paid", "effective_time",
+    )
+    list_filter = ("status", DepositProofFilter, "asset", "network", "created_at")
     search_fields = ("reference", "user__email", "tx_hash")
     date_hierarchy = "created_at"
     ordering = ("-created_at",)
@@ -252,6 +280,14 @@ class DepositAdmin(ManualAddMixin, admin.ModelAdmin):
                 "user_email", "reference", "network", "asset", "amount", "rate", "usd_amount",
                 "deposit_address", "tx_hash",
             ),
+        }),
+        ("Payment proof (uploaded by the user)", {
+            "description": (
+                "The screenshot the user uploaded to prove their payment. Compare the amount, network, "
+                "destination address and transaction hash on the image with this deposit BEFORE approving. "
+                "Click the image to open it full size in a new tab."
+            ),
+            "fields": ("screenshot_preview", "paid_at", "screenshot_uploaded_at"),
         }),
         ("Date & time", {"fields": ("created_at", "transaction_at", "effective_time")}),
         ("Processing", {"fields": (
@@ -291,6 +327,31 @@ class DepositAdmin(ManualAddMixin, admin.ModelAdmin):
     def effective_time(self, obj):
         return obj.effective_at
 
+    @admin.display(description="Screenshot", boolean=True)
+    def has_proof(self, obj):
+        return obj.has_screenshot
+
+    @admin.display(description="User paid", boolean=True, ordering="paid_at")
+    def user_paid(self, obj):
+        return obj.paid_at is not None
+
+    @admin.display(description="Payment screenshot")
+    def screenshot_preview(self, obj):
+        if obj is None or obj.pk is None or not obj.has_screenshot:
+            return "No screenshot uploaded."
+        full = images.image_url(obj.screenshot_public_id, fetch_format="auto")
+        thumb = images.thumbnail_url(obj.screenshot_public_id, width=700)
+        if not full or not thumb:
+            return "Screenshot exists but cannot be displayed (check the Cloudinary settings)."
+        uploaded = obj.screenshot_uploaded_at.strftime("%Y-%m-%d %H:%M UTC") if obj.screenshot_uploaded_at else "unknown time"
+        return format_html(
+            '<a href="{}" target="_blank" rel="noopener noreferrer">'
+            '<img src="{}" alt="Payment screenshot" '
+            'style="max-width:460px;max-height:620px;border:1px solid #ccc;border-radius:6px;display:block"></a>'
+            "<small>Uploaded {}. Click the image to open it full size.</small>",
+            full, thumb, uploaded,
+        )
+
     def has_add_permission(self, request):
         return super(ManualAddMixin, self).has_add_permission(request)
 
@@ -303,7 +364,7 @@ class DepositAdmin(ManualAddMixin, admin.ModelAdmin):
         elif obj.status == DepositStatus.DECLINED:
             editable |= {"decline_reason"}
         readonly = [f.name for f in self.model._meta.fields if f.name not in editable]
-        readonly += ["user_email", "effective_time"]
+        readonly += ["user_email", "effective_time", "screenshot_preview"]
         return readonly
 
     def save_model(self, request, obj, form, change):
@@ -366,6 +427,12 @@ class DepositAdmin(ManualAddMixin, admin.ModelAdmin):
                 ):
                     messages.error(request, "Illegal status change. Only pending → completed or pending → declined is allowed.")
                 elif new_status == DepositStatus.COMPLETED:
+                    if not current.has_screenshot:
+                        messages.warning(
+                            request,
+                            f"Deposit {current.reference} was approved WITHOUT a payment screenshot "
+                            "(the user never uploaded one).",
+                        )
                     services.complete_deposit(current, request.user)
                 else:
                     services.decline_deposit(current, request.user, reason)
@@ -379,15 +446,19 @@ class DepositAdmin(ManualAddMixin, admin.ModelAdmin):
 
     @admin.action(description="Mark selected completed (credits USD)")
     def mark_completed(self, request, queryset):
-        done = skipped = 0
+        done = skipped = no_proof = 0
         for dep in queryset.select_related("user"):
             if dep.status != DepositStatus.PENDING:
                 skipped += 1
                 continue
+            if not dep.has_screenshot:
+                no_proof += 1
             services.complete_deposit(dep, request.user)
             done += 1
         if done:
             self.message_user(request, f"{done} deposit(s) completed and credited.", messages.SUCCESS)
+        if no_proof:
+            messages.warning(request, f"{no_proof} of them had NO payment screenshot. Double-check these deposits.")
         if skipped:
             messages.error(request, f"{skipped} deposit(s) skipped: only pending deposits can be completed.")
 

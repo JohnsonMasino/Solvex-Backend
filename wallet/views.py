@@ -1,6 +1,8 @@
 from django.conf import settings
 from drf_spectacular.utils import OpenApiExample, OpenApiParameter, extend_schema
+from rest_framework.parsers import MultiPartParser
 from rest_framework.permissions import IsAuthenticated
+from rest_framework.throttling import ScopedRateThrottle, UserRateThrottle
 from rest_framework.views import APIView
 
 from core.exceptions import BusinessError
@@ -16,8 +18,9 @@ from .models import (
 )
 from .serializers import (
     ConfirmWithdrawalSerializer, DepositCreateSerializer, DepositFilterSerializer,
-    DepositSerializer, TransactionFilterSerializer, TransactionSerializer, WalletSerializer,
-    WithdrawalCreateSerializer, WithdrawalFilterSerializer, WithdrawalSerializer,
+    DepositScreenshotSerializer, DepositSerializer, TransactionFilterSerializer,
+    TransactionSerializer, WalletSerializer, WithdrawalCreateSerializer,
+    WithdrawalFilterSerializer, WithdrawalSerializer,
 )
 
 TAG = "Wallet"
@@ -79,7 +82,8 @@ class WalletConfigView(APIView):
             "currently 1.5). Poll this endpoint every `rate_refresh_seconds` to keep the deposit and withdrawal "
             "estimates current. Available to every logged-in user, KYC or not.\n\n"
             "`withdrawal_enabled` is `true` only for USDT networks that currently have a live rate. It says "
-            "nothing about the user's KYC status: check `access.can_withdraw` from `GET /kyc/status/` for that."
+            "nothing about the user's KYC status: check `access.can_withdraw` from `GET /kyc/status/` for that.\n\n"
+            "`screenshot_max_mb` and `screenshot_formats` describe the payment-screenshot upload limits."
             + docs.LIVE_RATE_GUIDE
             + docs.WITHDRAWAL_FEE_GUIDE
         ),
@@ -106,7 +110,8 @@ class DepositListCreateView(APIView):
         tags=[TAG], summary="My deposits",
         description=(
             "Paginated list of the caller's deposit requests, newest first. Each item shows the `asset`, the crypto "
-            "`amount`, and the `rate` / `usd_amount` that were frozen when the request was created."
+            "`amount`, and the `rate` / `usd_amount` that were frozen when the request was created, plus the "
+            "payment-proof fields (`has_screenshot`, `screenshot_url`, `screenshot_thumbnail_url`, `paid_at`)."
         ),
         parameters=[
             OpenApiParameter("status", str, enum=[s.value for s in DepositStatus], description="Filter by status."),
@@ -133,7 +138,10 @@ class DepositListCreateView(APIView):
             "**KYC is NOT required**: any logged-in user with a verified email can deposit. "
             "The asset is decided by `network`. `amount` is in that asset's own units. The USD value is calculated "
             "from the **live market rate at the moment of this request** and frozen on the deposit. The company "
-            "address is returned; funds are credited after admin confirmation."
+            "address is returned; funds are credited after admin confirmation.\n\n"
+            "**This is step 1 of 3.** After paying, the user uploads a screenshot "
+            "(`POST /wallet/deposits/{id}/screenshot/`) and then clicks *I have paid* "
+            "(`POST /wallet/deposits/{id}/paid/`). This request stays plain JSON."
             + docs.ACCESS_GUIDE
             + docs.LIVE_RATE_GUIDE
         ),
@@ -199,7 +207,12 @@ class DepositDetailView(APIView):
 
     @extend_schema(
         tags=[TAG], summary="Deposit detail",
-        description="Returns one of the caller's deposits. Other users' ids return 404.",
+        description=(
+            "Returns one of the caller's deposits. Other users' ids return 404.\n\n"
+            "Use it to resume the deposit flow: `status: pending` + `has_screenshot: false` -> show the upload "
+            "step; `has_screenshot: true` and `paid_at: null` -> show the preview and the *I have paid* button; "
+            "`paid_at` set -> show the waiting state."
+        ),
         parameters=[ID_PARAM],
         responses={
             200: success_response_doc("DepositDetailSuccess", "Deposit.", example=docs.DEPOSIT_DETAIL_EXAMPLE),
@@ -211,6 +224,120 @@ class DepositDetailView(APIView):
         if deposit is None:
             raise BusinessError("not_found", "Not found.", status=404)
         return success_response(DepositSerializer(deposit).data)
+
+
+class DepositScreenshotView(APIView):
+    """Step 2 of the deposit flow: the user uploads a screenshot of the payment."""
+
+    permission_classes = [IsAuthenticated, IsEmailVerified]
+    # The project default is JSON only; this view alone accepts file uploads.
+    parser_classes = [MultiPartParser]
+    # Limits the upload rate per user (scope "image_upload" lives in REST_FRAMEWORK in settings.py).
+    throttle_classes = [UserRateThrottle, ScopedRateThrottle]
+    throttle_scope = "image_upload"
+
+    @extend_schema(
+        tags=[TAG], summary="Upload payment screenshot",
+        description=(
+            "Uploads (or replaces) the screenshot of the user's payment for a **pending** deposit. "
+            "The image is stored privately in Cloudinary and the admin reviews it in the admin console before "
+            "approving or declining the deposit.\n\n"
+            "Send **`multipart/form-data`** with a single file field named **`screenshot`** "
+            "(JPG, PNG, WEBP or HEIC, max `screenshot_max_mb` MB, default 5). The file type is checked on the "
+            "server from the real file content.\n\n"
+            "May be called again to replace the image **until the user clicks *I have paid***. After that the "
+            "screenshot is locked (`409 deposit_already_paid`). KYC is not required."
+            + docs.SCREENSHOT_GUIDE
+        ),
+        request={"multipart/form-data": DepositScreenshotSerializer},
+        parameters=[ID_PARAM],
+        responses={
+            200: success_response_doc(
+                "DepositScreenshotSuccess", "Screenshot stored; returns the updated deposit.",
+                example=docs.DEPOSIT_SCREENSHOT_EXAMPLE,
+                message="Screenshot uploaded. Click 'I have paid' to submit your deposit.",
+            ),
+            400: docs.wallet_error(
+                "No file, not a real image, or too large.",
+                {"code": "validation_error", "message": "Please correct the highlighted fields.",
+                 "errors": {"screenshot": ["Please choose a screenshot of your payment."]}},
+                {"code": "invalid_image", "message": "Upload a JPG, PNG, WEBP or HEIC image."},
+                {"code": "image_too_large", "message": "The image is too large. The maximum size is 5 MB.",
+                 "data": {"max_mb": 5}},
+            ),
+            401: docs.UNAUTH,
+            403: docs.EMAIL_NOT_VERIFIED,
+            404: docs.NOT_FOUND,
+            409: docs.wallet_error(
+                "The deposit is no longer pending, or it is already marked as paid.",
+                {"code": "conflict", "message": "A screenshot can only be uploaded for a pending deposit.",
+                 "data": {"status": "completed"}},
+                {"code": "deposit_already_paid",
+                 "message": "This deposit is already marked as paid, so the screenshot can no longer be changed.",
+                 "data": {"status": "pending"}},
+            ),
+            429: docs.THROTTLED,
+            502: docs.wallet_error(
+                "The image host rejected or failed the upload.",
+                {"code": "upload_failed", "message": "We couldn't upload your image. Please try again."},
+            ),
+            503: docs.wallet_error(
+                "Image uploads are not configured on the server.",
+                {"code": "upload_unavailable",
+                 "message": "Image uploads are temporarily unavailable. Please try again later."},
+            ),
+        },
+    )
+    def post(self, request, pk):
+        s = DepositScreenshotSerializer(data=request.data)
+        s.is_valid(raise_exception=True)
+        deposit = services.attach_deposit_screenshot(request.user, pk, s.validated_data["screenshot"])
+        return success_response(
+            DepositSerializer(deposit).data,
+            message="Screenshot uploaded. Click 'I have paid' to submit your deposit.",
+        )
+
+
+class DepositPaidView(APIView):
+    """Step 3 of the deposit flow: the user's 'I have paid' click."""
+
+    permission_classes = [IsAuthenticated, IsEmailVerified]
+
+    @extend_schema(
+        tags=[TAG], summary="I have paid",
+        description=(
+            "The user confirms they have sent the payment. **A screenshot must have been uploaded first** "
+            "(`400 screenshot_required` otherwise). Sets `paid_at` and **locks the screenshot**. The deposit stays "
+            "`pending` until an admin approves or declines it. Calling it again is safe and returns the same "
+            "deposit. No request body."
+            + docs.SCREENSHOT_GUIDE
+        ),
+        request=None, parameters=[ID_PARAM],
+        responses={
+            200: success_response_doc(
+                "DepositPaidSuccess", "Payment confirmation recorded.", example=docs.DEPOSIT_PAID_EXAMPLE,
+                message="Thanks! We've received your payment confirmation and will review it shortly.",
+            ),
+            400: docs.wallet_error(
+                "No screenshot uploaded yet.",
+                {"code": "screenshot_required", "message": "Please upload a screenshot of your payment first."},
+            ),
+            401: docs.UNAUTH,
+            403: docs.EMAIL_NOT_VERIFIED,
+            404: docs.NOT_FOUND,
+            409: docs.wallet_error(
+                "The deposit is no longer pending.",
+                {"code": "conflict", "message": "Only pending deposits can be marked as paid.",
+                 "data": {"status": "completed"}},
+            ),
+        },
+    )
+    def post(self, request, pk):
+        deposit = services.confirm_deposit_paid(request.user, pk)
+        return success_response(
+            DepositSerializer(deposit).data,
+            message="Thanks! We've received your payment confirmation and will review it shortly.",
+        )
 
 
 class DepositCancelView(APIView):

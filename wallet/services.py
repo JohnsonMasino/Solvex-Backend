@@ -18,6 +18,18 @@ that moment (see wallet/rates.py).
 Company deposit addresses are NOT in settings / env any more: they live in the admin-managed
 DepositAddressSettings row (admin > Wallet > Deposit addresses).
 
+PAYMENT SCREENSHOT (new)
+    After creating a deposit the user pays, then:
+        attach_deposit_screenshot(user, deposit_id, file)  -> uploads the image to Cloudinary (private,
+                                                              signed-URL only) and stores its public_id.
+                                                              Can be repeated (replaces the old image)
+                                                              until the user clicks "I have paid".
+        confirm_deposit_paid(user, deposit_id)             -> "I have paid": requires a screenshot,
+                                                              stamps paid_at and locks the screenshot.
+    The admin sees the screenshot on the deposit page before approving / declining. Approving never
+    depends on the screenshot (admin discretion, and manual admin deposits have none); the admin
+    page simply warns when a deposit has no proof.
+
 Withdrawals are paid in USDT only (BEP20 / ERC20 / TRC20) and ALSO use the live USDT/USD rate,
 frozen at creation. A withdrawal fee (settings.WITHDRAWAL_FEE_PERCENT, default 1.5%) is added on
 top of the amount the user asked to receive:
@@ -55,6 +67,7 @@ from django.conf import settings
 from django.db import IntegrityError, transaction
 from django.utils import timezone
 
+from core import images
 from core.exceptions import BusinessError
 from core.utils import generate_otp, hash_value, money, verify_hash
 from core.utils import usdt as to_usdt
@@ -393,6 +406,8 @@ def get_config() -> dict:
         "rates_updated_at": min(fetched).isoformat() if fetched else None,
         "rate_refresh_seconds": rates.refresh_seconds(),
         "withdrawal_request_expiry_minutes": settings.PENDING_TRANSACTION_EXPIRY_MINUTES,
+        "screenshot_max_mb": settings.IMAGE_UPLOAD_MAX_MB,
+        "screenshot_formats": ["jpg", "png", "webp", "heic"],
     }
 
 
@@ -482,6 +497,81 @@ def cancel_deposit(user, deposit_id) -> Deposit:
         deposit.status = DepositStatus.CANCELLED
         deposit.save(update_fields=["status", "updated_at"])
     return deposit
+
+
+# --------------------------------------------------------------------------- #
+# Deposits (user side): payment screenshot + "I have paid"
+# --------------------------------------------------------------------------- #
+def _screenshot_folder(user) -> str:
+    return f"{settings.CLOUDINARY_FOLDER_ROOT}/deposit_screenshots/{user.pk}"
+
+
+def _assert_proof_editable(deposit) -> None:
+    """The screenshot can be uploaded / replaced only while the deposit is pending and the user
+    has not yet clicked 'I have paid'."""
+    if deposit.status != DepositStatus.PENDING:
+        raise _conflict(deposit.status, "A screenshot can only be uploaded for a pending deposit.")
+    if deposit.paid_at is not None:
+        raise BusinessError(
+            "deposit_already_paid",
+            "This deposit is already marked as paid, so the screenshot can no longer be changed.",
+            status=409,
+            data={"status": deposit.status},
+        )
+
+
+def attach_deposit_screenshot(user, deposit_id, uploaded_file) -> Deposit:
+    """Validate the image, upload it to Cloudinary (private) and store its public_id on the deposit.
+
+    The slow network call happens OUTSIDE any database transaction/lock. The row is then locked
+    briefly to save the new id. A replaced image is deleted from Cloudinary afterwards, and if the
+    save fails the freshly uploaded image is deleted again so nothing is orphaned."""
+    deposit = Deposit.objects.filter(pk=deposit_id, user=user).first()
+    if deposit is None:
+        raise _not_found()
+    _assert_proof_editable(deposit)
+
+    data, _kind = images.read_and_validate(uploaded_file)
+    new_id = images.upload_image(
+        data,
+        folder=_screenshot_folder(user),
+        tags=["deposit_screenshot", f"deposit_{deposit.pk}"],
+    )
+
+    old_id = ""
+    try:
+        with transaction.atomic():
+            d = Deposit.objects.select_for_update().get(pk=deposit.pk)
+            _assert_proof_editable(d)  # re-check: it may have changed while we were uploading
+            old_id = d.screenshot_public_id
+            d.screenshot_public_id = new_id
+            d.screenshot_uploaded_at = timezone.now()
+            d.save(update_fields=["screenshot_public_id", "screenshot_uploaded_at", "updated_at"])
+    except Exception:
+        images.delete_image(new_id)
+        raise
+
+    if old_id and old_id != new_id:
+        images.delete_image(old_id)
+    return d
+
+
+def confirm_deposit_paid(user, deposit_id) -> Deposit:
+    """The user's 'I have paid' click. Needs a screenshot. Safe to call twice (idempotent)."""
+    with transaction.atomic():
+        d = Deposit.objects.select_for_update().filter(pk=deposit_id, user=user).first()
+        if d is None:
+            raise _not_found()
+        if d.status != DepositStatus.PENDING:
+            raise _conflict(d.status, "Only pending deposits can be marked as paid.")
+        if not d.screenshot_public_id:
+            raise BusinessError(
+                "screenshot_required", "Please upload a screenshot of your payment first."
+            )
+        if d.paid_at is None:
+            d.paid_at = timezone.now()
+            d.save(update_fields=["paid_at", "updated_at"])
+    return d
 
 
 # --------------------------------------------------------------------------- #
