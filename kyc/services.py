@@ -4,7 +4,6 @@ kyc/services.py - ALL business logic + the public cross-app contract:
     submit_kyc(user, data, request) -> KYCSubmission
     approve_submission(submission, admin_user) -> None
     reject_submission(submission, admin_user, reason) -> None
-    get_avatar_url(user, size=256) -> str | None      (profile picture for the user's pages)
 
 This app is the ONLY writer of user.tier and user.kyc_status.
 
@@ -18,10 +17,12 @@ from a single source of truth. The real enforcement is on the endpoints themselv
 
 Images
 ------
-A KYC submission carries three images, uploaded through core/images.py:
+A KYC submission carries two images, uploaded through core/images.py:
 
-* profile photo : PUBLIC  (private=False), folder  <root>/avatars
-* ID front/back : PRIVATE (private=True),  folder  <root>/kyc/<user_id>
+* ID front/back : PRIVATE (private=True), folder  <root>/kyc/<user_id>
+
+The profile picture is NOT part of KYC. It lives in the profiles app (profiles.services),
+where the user can change it at any time.
 
 The same `private` value is used when uploading, building URLs and deleting.
 Images are written once, when the submission is created. There is no replace endpoint,
@@ -53,19 +54,13 @@ logger = logging.getLogger(__name__)
 NOT_SUBMITTED = "not_submitted"
 
 # Image delivery settings (single source of truth for this app)
-PROFILE_PHOTO_PRIVATE = False
 ID_IMAGE_PRIVATE = True
-AVATAR_SIZE = 256
 IMAGE_FORMATS = ["jpg", "png", "webp", "heic"]
 
 
 # --------------------------------------------------------------------------- #
 # Image helpers
 # --------------------------------------------------------------------------- #
-def _avatar_folder() -> str:
-    return f"{settings.CLOUDINARY_FOLDER_ROOT}/avatars"
-
-
 def _id_folder(user) -> str:
     return f"{settings.CLOUDINARY_FOLDER_ROOT}/kyc/{user.pk}"
 
@@ -81,35 +76,9 @@ def get_image_url(public_id: str, *, private: bool, **transform):
         return None
 
 
-def get_avatar_url(user, size: int = AVATAR_SIZE):
-    """
-    Profile picture of the user (square, face-centred), or None.
-
-    Uses the newest submission that is pending or approved. A rejected submission's photo
-    is not shown. Other apps (authentication / profiles) call THIS function, they must not
-    read kyc models directly.
-    """
-    sub = (
-        KYCSubmission.objects.filter(user=user, status__in=[KYCStatus.PENDING, KYCStatus.APPROVED])
-        .exclude(profile_photo_public_id="")
-        .order_by("-attempt_number", "-created_at")
-        .first()
-    )
-    if sub is None:
-        return None
-    return get_image_url(
-        sub.profile_photo_public_id, private=PROFILE_PHOTO_PRIVATE,
-        width=size, height=size, crop="fill", gravity="face",
-    )
-
-
 def get_submission_images(sub) -> dict:
-    """URLs for one submission. ID image URLs are signed and temporary: never cache them."""
+    """URLs for one submission. They are signed and temporary: never cache them."""
     return {
-        "profile_photo_url": get_image_url(
-            sub.profile_photo_public_id, private=PROFILE_PHOTO_PRIVATE,
-            width=AVATAR_SIZE, height=AVATAR_SIZE, crop="fill", gravity="face",
-        ),
         "id_front_url": get_image_url(sub.id_front_public_id, private=ID_IMAGE_PRIVATE),
         "id_back_url": get_image_url(sub.id_back_public_id, private=ID_IMAGE_PRIVATE),
     }
@@ -192,7 +161,6 @@ def get_status_summary(user) -> dict:
         "attempts_used": used,
         "attempts_remaining": remaining,
         "access": get_access(user),
-        "avatar_url": get_avatar_url(user),
         "latest": latest,
     }
 
@@ -269,7 +237,7 @@ def _attempts_error(used: int):
 def _preflight(user) -> None:
     """
     Cheap checks BEFORE any image is uploaded, so a user who can't submit anyway
-    doesn't cost three Cloudinary uploads. The authoritative checks run again
+    doesn't cost two Cloudinary uploads. The authoritative checks run again
     inside the locked transaction.
     """
     User = get_user_model()
@@ -344,7 +312,6 @@ def _create_submission(user, data: dict, request, id_number: str, id_hash: str, 
                     id_number=id_number,
                     id_number_hash=id_hash,
                     # images
-                    profile_photo_public_id=image_ids["profile_photo"],
                     id_front_public_id=image_ids["id_front"],
                     id_back_public_id=image_ids["id_back"],
                     # employment
@@ -383,13 +350,13 @@ def _create_submission(user, data: dict, request, id_number: str, id_hash: str, 
 def submit_kyc(user, data: dict, request) -> KYCSubmission:
     """
     `data` is the validated payload from SubmitKYCSerializer: the five nested sections plus
-    the three uploaded files `profile_photo`, `id_front`, `id_back`.
+    the two uploaded files `id_front` and `id_back`.
 
     Order of work (so nothing is wasted or left behind):
       1. cheap state checks            -> no upload if the user can't submit anyway
-      2. validate all three files      -> real content check, before any upload
+      2. validate both files           -> real content check, before any upload
       3. upload to Cloudinary          -> outside the DB transaction (slow network calls)
-      4. locked DB transaction         -> creates the row with the three public ids
+      4. locked DB transaction         -> creates the row with the two public ids
       5. on ANY failure after step 3   -> the uploaded images are deleted again
     """
     i = data["identification"]
@@ -398,14 +365,12 @@ def submit_kyc(user, data: dict, request) -> KYCSubmission:
 
     _preflight(user)
 
-    photo = _read_image(data["profile_photo"])
     front = _read_image(data["id_front"])
     back = _read_image(data["id_back"])
 
     uploaded: list = []
     image_ids: dict = {}
     try:
-        image_ids["profile_photo"] = _upload(photo, _avatar_folder(), PROFILE_PHOTO_PRIVATE, uploaded)
         image_ids["id_front"] = _upload(front, _id_folder(user), ID_IMAGE_PRIVATE, uploaded)
         image_ids["id_back"] = _upload(back, _id_folder(user), ID_IMAGE_PRIVATE, uploaded)
 

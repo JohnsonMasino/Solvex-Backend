@@ -127,10 +127,9 @@ class KYCSubmission(UUIDModel, TimeStampedModel):
     id_number_hash = models.CharField(max_length=64, db_index=True)
 
     # ---- images (Cloudinary public ids; see core/images.py) ---------------
-    # Profile photo: PUBLIC delivery (private=False), shown as the user's avatar.
     # ID front/back: PRIVATE delivery (private=True), only reachable through signed URLs.
     # Set once when the KYC is submitted and never changed afterwards (the images are locked).
-    profile_photo_public_id = models.CharField(max_length=255, blank=True)
+    # The profile picture is NOT stored here: it lives in profiles.Profile.
     id_front_public_id = models.CharField(max_length=255, blank=True)
     id_back_public_id = models.CharField(max_length=255, blank=True)
 
@@ -178,4 +177,4 @@ class KYCSubmission(UUIDModel, TimeStampedModel):
 
     @property
     def has_all_images(self) -> bool:
-        return bool(self.profile_photo_public_id and self.id_front_public_id and self.id_back_public_id)
+        return bool(self.id_front_public_id and self.id_back_public_id)
