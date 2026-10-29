@@ -46,3 +46,47 @@ class EligibleEmail(models.Model):
         # Also normalise for shell / script / bulk-script inserts.
         self.email = self.normalize(self.email)
         super().save(*args, **kwargs)
+
+
+class PurchasedEmail(models.Model):
+    """
+    One row = one email address that has purchased a trading signal.
+
+    Fully managed from the admin console (add / edit / pause / delete).
+    The frontend reads the ACTIVE rows through GET /api/signals/purchases/.
+    """
+
+    email = models.EmailField(
+        unique=True,
+        help_text="Must match the email the user registered with. Stored in lowercase.",
+    )
+    note = models.CharField(
+        max_length=255,
+        blank=True,
+        help_text="Optional internal note (e.g. plan bought, payment reference). Never shown to users.",
+    )
+    is_active = models.BooleanField(
+        default=True,
+        help_text="Untick to hide this purchase from the frontend without deleting the email.",
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+        verbose_name = "Purchased email"
+        verbose_name_plural = "Purchased emails"
+
+    def __str__(self):
+        return self.email
+
+    @staticmethod
+    def normalize(value):
+        return (value or "").strip().lower()
+
+    def clean(self):
+        self.email = self.normalize(self.email)
+
+    def save(self, *args, **kwargs):
+        self.email = self.normalize(self.email)
+        super().save(*args, **kwargs)

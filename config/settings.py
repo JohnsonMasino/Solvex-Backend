@@ -270,6 +270,7 @@ JAZZMIN_SETTINGS = {
         "auth.Group":           "fas fa-layer-group",
         "signals":                "fas fa-satellite-dish",
         "signals.EligibleEmail":  "fas fa-envelope-open-text",
+        "signals.PurchasedEmail": "fas fa-shopping-cart",
     },
     "default_icon_parents":  "fas fa-chevron-circle-right",
     "default_icon_children": "fas fa-circle",

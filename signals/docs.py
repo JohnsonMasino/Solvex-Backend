@@ -1,4 +1,4 @@
-"""OpenAPI examples + frontend guide for the Trading Signals endpoint."""
+"""OpenAPI examples + frontend guide for the Trading Signals endpoints."""
 from drf_spectacular.utils import OpenApiExample, OpenApiResponse, inline_serializer
 from rest_framework import serializers
 
@@ -71,6 +71,11 @@ field. Treat the prefill as a convenience only. The deposit endpoints still vali
 This app only answers "is this email on the list?". It does not create orders, charge users, activate
 signals or send signals. The payment is a normal wallet deposit.
 
+**6. After payment: see who has purchased**
+
+Once an admin confirms a payment, they add the buyer's email to the purchased list. See
+`GET /signals/purchases/` for how the frontend reads it.
+
 ---
 ### Admin guide (non-technical)
 
@@ -87,6 +92,71 @@ signals or send signals. The payment is a normal wallet deposit.
 Duplicates are rejected, and `Jane@x.com` and `jane@x.com` count as the same email.
 """
 
+PURCHASES_GUIDE = """
+Returns the list of emails that have **purchased a trading signal**, plus a flag telling the
+frontend whether the **logged-in user** is one of them.
+
+The user is identified from the JWT. **Do not send an email or user id.** The list is maintained by
+admins in *Admin console > Trading Signals > Purchased emails*, exactly like the Eligible emails list.
+
+- Only rows with **Is active = ticked** are returned.
+- Emails are returned in **lowercase**, newest purchase first.
+- `data.purchased` is `true` when the **logged-in user's own email** is on the list (case-insensitive).
+- `data.count` is the number of items in `data.emails`.
+- An empty list is **not an error**: you get HTTP 200 with `count: 0` and `emails: []`.
+- Admin changes apply **immediately**. There is no cache. Call this endpoint every time the page opens.
+- Only real errors (`401`) arrive as error responses.
+
+---
+### Response shape
+
+| Field | Type | Meaning |
+|---|---|---|
+| `data.count` | number | How many purchased emails are returned |
+| `data.purchased` | boolean | Has the logged-in user purchased? |
+| `data.emails` | array | Each item: `{ "email": string, "purchased_at": ISO datetime }` |
+
+`purchased_at` is the moment the admin added the email (UTC, ISO 8601).
+
+---
+### Frontend flow
+
+```js
+// Load the purchases list
+const res = await api.get("/signals/purchases/");
+const { count, purchased, emails } = res.data.data;
+
+if (purchased) {
+  // The logged-in user has bought a signal: show the "purchased" state
+}
+
+// Render the list
+emails.forEach(({ email, purchased_at }) => {
+  // e.g. show email + new Date(purchased_at).toLocaleDateString()
+});
+```
+
+Show a loading state until the request resolves. On `401`, follow your normal refresh-token / logout flow.
+
+**What the backend does NOT do:** it does not detect payments or add emails automatically. An admin
+adds the email by hand after confirming the user's deposit.
+
+---
+### Admin guide (non-technical)
+
+*Admin console > Trading Signals > Purchased emails*
+
+| Task | How |
+|---|---|
+| Record a purchase | **Add purchased email**, enter the exact email the user registered with, **Save** |
+| Hide a purchase | Untick **Is active** (also toggleable directly in the list), or use the bulk actions |
+| Remove a purchase | Open the row > **Delete**, or tick rows in the list and use *Delete selected* |
+| Edit an email | Open the row, change it, **Save** |
+| Find someone | Use the search box (email or note) |
+
+Duplicates are rejected, and `Jane@x.com` and `jane@x.com` count as the same email.
+"""
+
 ELIGIBLE_EXAMPLE = {
     "success": True,
     "message": "Success",
@@ -97,6 +167,25 @@ NOT_ELIGIBLE_EXAMPLE = {
     "success": True,
     "message": "Success",
     "data": {"eligible": False, "message": "You are not eligible for a trading signal at this time."},
+}
+
+PURCHASES_EXAMPLE = {
+    "success": True,
+    "message": "Success",
+    "data": {
+        "count": 2,
+        "purchased": True,
+        "emails": [
+            {"email": "jane@mail.com", "purchased_at": "2026-10-28T14:32:10.123456Z"},
+            {"email": "john@mail.com", "purchased_at": "2026-10-20T09:05:44.987654Z"},
+        ],
+    },
+}
+
+PURCHASES_EMPTY_EXAMPLE = {
+    "success": True,
+    "message": "Success",
+    "data": {"count": 0, "purchased": False, "emails": []},
 }
 
 # --------------------------------------------------------------------------- #
