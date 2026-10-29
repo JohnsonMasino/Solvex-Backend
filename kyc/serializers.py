@@ -156,7 +156,8 @@ class ConsentSerializer(serializers.Serializer):
 class SubmitKYCSerializer(serializers.Serializer):
     """
     Sent as multipart/form-data. The five sections use dotted keys (personal.full_name,
-    address.line1, ...); the three images are top-level file fields.
+    address.line1, ...); the two ID images are top-level file fields.
+    The profile picture is NOT part of KYC (see the profiles app: POST /profile/photo/).
     """
     personal = PersonalSerializer()
     address = AddressSerializer()
@@ -164,14 +165,8 @@ class SubmitKYCSerializer(serializers.Serializer):
     employment = EmploymentSerializer()
     consent = ConsentSerializer()
 
-    # All three are required. To make the profile photo optional, use
-    # `serializers.FileField(required=False, ...)` and skip it in services.submit_kyc.
-    profile_photo = _image_field("a profile photo")
     id_front = _image_field("the front of your ID document")
     id_back = _image_field("the back of your ID document")
-
-    def validate_profile_photo(self, value):
-        return _check_image(value)
 
     def validate_id_front(self, value):
         return _check_image(value)

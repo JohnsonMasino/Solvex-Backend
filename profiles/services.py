@@ -3,15 +3,27 @@ profiles/services.py
 Public cross-app contract (General Guide section 8):
     get_or_create_profile(user) -> Profile
     sync_from_kyc(user, kyc_data) -> None      # called by the kyc app on approval
-Internal (used by the view):
+    get_avatar_url(user, size=256) -> str | None   # the user's profile picture, for login / header / other apps
+Internal (used by the views):
     update_profile(user, validated_data) -> (Profile, list[str])
+    set_profile_photo(user, file) -> Profile
+    remove_profile_photo(user) -> Profile
+
+Profile picture
+---------------
+Stored ONLY here (Profile.profile_photo_public_id). It is public (private=False) and is delivered
+as a square, face-centred crop. The same `private` value is used when uploading, building URLs and
+deleting. Replacing a picture uploads the new one first, saves its id, and only then deletes the old
+one, so the user never ends up without a picture because of a failed upload.
 """
 import logging
+from typing import Optional
 
 import pycountry
 from django.conf import settings
 from django.db import transaction
 
+from core import images
 from core.exceptions import BusinessError
 
 from . import emails
@@ -49,6 +61,10 @@ KYC_PROFILE_KEYS = (
     "address_line1", "address_line2", "city", "state", "postal_code", "country", "address_entry_method",
 )
 
+# Profile picture delivery settings (single source of truth)
+AVATAR_PRIVATE = False
+AVATAR_SIZE = 256
+
 
 # --------------------------------------------------------------------------- country helpers
 def _lookup_country(code: str):
@@ -81,6 +97,95 @@ def get_locked_fields(user) -> list:
     return list(IDENTITY_FIELDS) if is_identity_locked(user) else []
 
 
+# --------------------------------------------------------------------------- profile picture
+def _avatar_folder() -> str:
+    return f"{settings.CLOUDINARY_FOLDER_ROOT}/avatars"
+
+
+def _avatar_url(public_id: str, size: int = AVATAR_SIZE) -> Optional[str]:
+    if not public_id:
+        return None
+    try:
+        return images.image_url(
+            public_id, private=AVATAR_PRIVATE, width=size, height=size, crop="fill", gravity="face",
+        )
+    except Exception:
+        logger.exception("profiles: could not build avatar url for %s", public_id)
+        return None
+
+
+def avatar_url_for(profile, size: int = AVATAR_SIZE) -> Optional[str]:
+    """URL for an already loaded Profile (used by the serializer and the admin)."""
+    return _avatar_url(profile.profile_photo_public_id, size)
+
+
+def get_avatar_url(user, size: int = AVATAR_SIZE) -> Optional[str]:
+    """
+    Public contract: the user's profile picture URL (square, face-centred) or None.
+    Does not create a profile. Call this from the authentication app to put the picture
+    in the login response.
+    """
+    public_id = (
+        Profile.objects.filter(user=user).values_list("profile_photo_public_id", flat=True).first()
+    )
+    return _avatar_url(public_id or "", size)
+
+
+def delete_avatar_image(public_id: str) -> None:
+    """Best-effort delete from Cloudinary. Never raises: a leftover image is harmless."""
+    if not public_id:
+        return
+    try:
+        images.delete_image(public_id, private=AVATAR_PRIVATE)
+    except Exception:
+        logger.exception("profiles: could not delete image %s", public_id)
+
+
+def set_profile_photo(user, file) -> Profile:
+    """
+    Adds or replaces the user's profile picture.
+
+      1. validate the real file content   -> before any upload
+      2. upload the new image             -> outside the DB transaction (slow network call)
+      3. save the new id on the profile   -> locked row, so two uploads can't race
+      4. delete the OLD image after commit
+      If step 3 fails, the new upload is deleted again and the old picture stays.
+    """
+    try:
+        file.seek(0)
+    except Exception:
+        pass
+    data = images.read_and_validate(file)
+    new_id = images.upload_image(data, folder=_avatar_folder(), private=AVATAR_PRIVATE)
+
+    try:
+        with transaction.atomic():
+            profile, _ = Profile.objects.select_for_update().get_or_create(user=user)
+            profile.user = user
+            old_id = profile.profile_photo_public_id
+            profile.profile_photo_public_id = new_id
+            profile.save(update_fields=["profile_photo_public_id", "updated_at"])
+            if old_id and old_id != new_id:
+                transaction.on_commit(lambda: delete_avatar_image(old_id))
+    except Exception:
+        delete_avatar_image(new_id)
+        raise
+    return profile
+
+
+def remove_profile_photo(user) -> Profile:
+    """Removes the profile picture. Idempotent: no picture means nothing to do."""
+    with transaction.atomic():
+        profile, _ = Profile.objects.select_for_update().get_or_create(user=user)
+        profile.user = user
+        old_id = profile.profile_photo_public_id
+        if old_id:
+            profile.profile_photo_public_id = ""
+            profile.save(update_fields=["profile_photo_public_id", "updated_at"])
+            transaction.on_commit(lambda: delete_avatar_image(old_id))
+    return profile
+
+
 # --------------------------------------------------------------------------- public contract
 def get_or_create_profile(user) -> Profile:
     profile, _ = Profile.objects.select_related("user").get_or_create(user=user)
@@ -91,7 +196,7 @@ def sync_from_kyc(user, kyc_data: dict) -> None:
     """
     Called by the kyc app on approval (inside its transaction).
     Bypasses the identity lock and overwrites values. Missing keys are skipped,
-    unknown keys ignored. Never sends emails.
+    unknown keys ignored. Never sends emails. Never touches the profile picture.
     """
     profile = get_or_create_profile(user)
     for key in KYC_PROFILE_KEYS:

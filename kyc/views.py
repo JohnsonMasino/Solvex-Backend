@@ -29,7 +29,7 @@ class OptionsView(APIView):
         summary="KYC form options",
         description=(
             "Returns every dropdown list needed to render the KYC form, each as a list of value/label pairs, "
-            "plus the image upload limits (`image_max_mb`, `image_formats`) for the profile photo and ID images."
+            "plus the image upload limits (`image_max_mb`, `image_formats`) for the ID images."
         ),
         responses={
             200: success_response_doc("KYCOptionsSuccess", "Form options returned.", example=docs.OPTIONS_EXAMPLE),
@@ -48,13 +48,11 @@ class StatusView(APIView):
         summary="My KYC status (and what I'm allowed to do)",
         description=(
             "Returns the caller's tier, KYC status, attempt counters, latest submission summary, an `access` "
-            "object telling the frontend which features are unlocked, and `avatar_url` (the user's profile "
-            "picture, or `null`).\n\n"
+            "object telling the frontend which features are unlocked.\n\n"
             "**Deposits do not require KYC.** `access.can_deposit` is always `true`. Withdrawals, trading and "
             "loan requests require an approved KYC (`access.can_withdraw`, `access.can_trade`, "
             "`access.can_request_loan`)."
             + docs.ACCESS_GUIDE
-            + docs.AVATAR_GUIDE
         ),
         responses={
             200: success_response_doc("KYCStatusSuccess", "Current KYC status.", example=docs.STATUS_EXAMPLE),
@@ -97,15 +95,16 @@ class SubmitView(APIView):
 
     @extend_schema(
         tags=[TAG],
-        summary="Submit KYC (with profile photo and ID images)",
+        summary="Submit KYC (with ID front and back images)",
         description=(
-            "Submits all five KYC sections **and three images** in one request for manual review. "
+            "Submits all five KYC sections **and two ID images** in one request for manual review. "
             "Tier 1 users only. KYC is **not** needed to deposit; it unlocks withdrawals, trading and loans.\n\n"
             "Send **`multipart/form-data`**. The sections use dotted keys (`personal.full_name`, "
-            "`address.line1`, ...) and the files use the top-level fields **`profile_photo`**, **`id_front`** "
-            "and **`id_back`**. All three images are required. JPG, PNG, WEBP or HEIC, max `image_max_mb` MB each "
+            "`address.line1`, ...) and the files use the top-level fields **`id_front`** and **`id_back`**. "
+            "Both images are required. JPG, PNG, WEBP or HEIC, max `image_max_mb` MB each "
             "(default 5); the type is checked on the server from the real file content.\n\n"
-            "The images are locked once submitted. After a rejection the user submits again with a new set."
+            "The images are locked once submitted. After a rejection the user submits again with a new set. "
+            "The profile picture is **not** part of KYC: it is managed with `POST /profile/photo/`."
             + docs.IMAGES_GUIDE
         ),
         request={"multipart/form-data": docs.SUBMIT_MULTIPART_DOC},
@@ -129,9 +128,8 @@ class SubmitView(APIView):
                     "code": "validation_error",
                     "message": "Please correct the highlighted fields.",
                     "errors": {
-                        "profile_photo": ["Please upload a profile photo."],
-                        "id_front": ["The image is too large. The maximum size is 5 MB."],
-                        "id_back": ["Upload a JPG, PNG, WEBP or HEIC image."],
+                        "id_front": ["Please upload the front of your ID document."],
+                        "id_back": ["The image is too large. The maximum size is 5 MB."],
                     },
                 },
             ),
@@ -192,7 +190,7 @@ class SubmissionDetailView(APIView):
         summary="My latest submission",
         description=(
             "Read-only view of the caller's latest submission with the ID number masked. "
-            "Includes an `images` object with the profile photo and the front/back ID image URLs."
+            "Includes an `images` object with the front and back ID image URLs."
             + docs.DETAIL_IMAGES_GUIDE
         ),
         responses={

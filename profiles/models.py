@@ -26,6 +26,10 @@ class Profile(UUIDModel, TimeStampedModel):
     country = models.CharField(max_length=2, blank=True)  # ISO alpha-2
     address_entry_method = models.CharField(max_length=12, choices=EntryMethod.choices, blank=True)
 
+    # Cloudinary public id of the profile picture (see core/images.py). PUBLIC delivery (private=False).
+    # This is the ONLY place the profile picture is stored. KYC does not keep one.
+    profile_photo_public_id = models.CharField(max_length=255, blank=True)
+
     class Meta:
         ordering = ("-created_at",)
 
@@ -35,6 +39,10 @@ class Profile(UUIDModel, TimeStampedModel):
     @property
     def has_full_address(self) -> bool:
         return bool(self.address_line1 and self.city and self.country)
+
+    @property
+    def has_photo(self) -> bool:
+        return bool(self.profile_photo_public_id)
 
     @property
     def is_complete(self) -> bool:

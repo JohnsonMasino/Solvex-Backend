@@ -10,7 +10,7 @@ from .models import KYCStatus, KYCSubmission
 EDITABLE_FIELDS = ("status", "rejection_reason", "admin_note")
 
 # Read-only preview columns / fields (they are NOT model fields, so they are added to readonly_fields by hand)
-PREVIEW_FIELDS = ("profile_photo_preview", "id_front_preview", "id_back_preview")
+PREVIEW_FIELDS = ("id_front_preview", "id_back_preview", "current_profile_picture")
 
 
 def _err_text(exc):
@@ -20,7 +20,7 @@ def _err_text(exc):
 @admin.register(KYCSubmission)
 class KYCSubmissionAdmin(admin.ModelAdmin):
     list_display = (
-        "photo_thumb", "user_email", "full_name", "status", "id_type", "nationality",
+        "user_email", "full_name", "status", "id_type", "nationality",
         "attempt_number", "created_at", "reviewed_at",
     )
     list_filter = ("status", "nationality", "id_type", "created_at")
@@ -35,8 +35,8 @@ class KYCSubmissionAdmin(admin.ModelAdmin):
             "user_email", "attempt_number", "status", "rejection_reason", "admin_note",
             "reviewed_by", "reviewed_at",
         )}),
-        ("Photos & ID images", {"fields": (
-            "profile_photo_preview", "id_front_preview", "id_back_preview",
+        ("ID images", {"fields": (
+            "id_front_preview", "id_back_preview", "current_profile_picture",
         )}),
         ("Personal Biodata", {"fields": (
             "full_name", "date_of_birth", "nationality", "sex", "phone_number",
@@ -81,27 +81,25 @@ class KYCSubmissionAdmin(admin.ModelAdmin):
             url=url, w=max_w, h=max_h,
         )
 
-    @admin.display(description="Photo")
-    def photo_thumb(self, obj):
-        if not obj.profile_photo_public_id:
-            return "—"
-        url = services.get_image_url(
-            obj.profile_photo_public_id, private=services.PROFILE_PHOTO_PRIVATE,
-            width=64, height=64, crop="fill", gravity="face",
-        )
-        if not url:
-            return "—"
-        return format_html(
-            '<img src="{}" alt="" style="width:36px;height:36px;border-radius:50%;object-fit:cover">', url
-        )
-
-    @admin.display(description="Profile photo")
-    def profile_photo_preview(self, obj):
+    @admin.display(description="Current profile picture (from the user's Profile)")
+    def current_profile_picture(self, obj):
+        """
+        Shown next to the ID images so the reviewer can compare faces. The picture is NOT part of the
+        submission: it is read through the profiles service contract and can be changed by the user.
+        """
         if obj is None:
             return "—"
-        return self._image_html(
-            obj.profile_photo_public_id, private=services.PROFILE_PHOTO_PRIVATE,
-            max_w=260, max_h=260, width=520, height=520, crop="fill", gravity="face",
+        try:
+            from profiles.services import get_avatar_url  # lazy cross-app import via the service contract
+            url = get_avatar_url(obj.user, size=320)
+        except Exception:
+            url = None
+        if not url:
+            return "The user has no profile picture"
+        return format_html(
+            '<img src="{}" alt="" style="width:160px;height:160px;border-radius:8px;'
+            'border:1px solid #ccc;object-fit:cover">',
+            url,
         )
 
     @admin.display(description="ID document: front")
@@ -125,7 +123,7 @@ class KYCSubmissionAdmin(admin.ModelAdmin):
 
     def get_readonly_fields(self, request, obj=None):
         # Every model field except the three review fields is read-only. That includes the
-        # three *_public_id fields, so the images are locked and cannot be swapped in the admin.
+        # two *_public_id fields, so the images are locked and cannot be swapped in the admin.
         readonly = [f.name for f in self.model._meta.fields if f.name not in EDITABLE_FIELDS]
         readonly.append("user_email")
         readonly += list(PREVIEW_FIELDS)

@@ -44,29 +44,14 @@ ACCESS_GUIDE = """
 """
 
 # ---------------------------------------------------------------------------
-# Frontend guide: the profile picture (rendered on GET /kyc/status/)
-# ---------------------------------------------------------------------------
-AVATAR_GUIDE = """
-
----
-### Frontend notes: the user's profile picture (`avatar_url`)
-
-The profile photo the user uploads during KYC becomes their **profile picture**.
-
-- `data.avatar_url` is a ready-to-use image URL: **square 256 x 256, cropped around the face**, served from the Cloudinary CDN. Put it straight into an `<img src>`. Do not add anything to it.
-- It is `null` until the user has submitted KYC. Show your default avatar / initials in that case.
-- It is shown while the KYC is **pending or approved**. If the submission is **rejected**, it is `null` again until the user submits a new one.
-- Fetch it with `GET /kyc/status/` right after login and when the dashboard loads, keep it in your auth/user state, and refetch it after a successful `POST /kyc/submit/` (the submit response also carries `images.profile_photo_url`, the same picture).
-- The URL is stable (it does not expire), so it is safe to cache in state or `localStorage`.
-"""
-
-# ---------------------------------------------------------------------------
 # Frontend guide: submitting the images (rendered on POST /kyc/submit/)
 # ---------------------------------------------------------------------------
 IMAGES_GUIDE = """
 
 ---
-### Frontend notes: profile photo + ID front/back
+### Frontend notes: ID front/back images
+
+**The profile picture is not part of KYC.** It is managed in the profile with `POST /profile/photo/` (see the Profile section). KYC only collects the two ID images below.
 
 **`POST /kyc/submit/` is now `multipart/form-data`, not JSON.** A JSON body is rejected with `415 Unsupported Media Type`.
 
@@ -79,7 +64,6 @@ IMAGES_GUIDE = """
 | `identification.id_type`, `identification.id_number` | text | same values as before |
 | `employment.employment_status`, `employment.source_of_income`, `employment.occupation`, `employment.employer_name`, `employment.annual_income_range`, `employment.expected_annual_volume`, `employment.transaction_frequency`, `employment.typical_transaction_size` | text | same values as before |
 | `consent.accuracy_declaration`, `consent.privacy_notice_accepted`, `consent.terms_accepted`, `consent.marketing_consent` | text `"true"` / `"false"` | the first three must be `"true"` |
-| **`profile_photo`** | **file** | the user's face photo. Becomes their profile picture. Required |
 | **`id_front`** | **file** | front of the government ID. Required |
 | **`id_back`** | **file** | back of the government ID. Required (for a passport, upload the photo page again or the back cover, as your product decides) |
 
@@ -114,8 +98,7 @@ fd.append("consent.accuracy_declaration", "true");
 fd.append("consent.privacy_notice_accepted", "true");
 fd.append("consent.terms_accepted", "true");
 fd.append("consent.marketing_consent", "false");
-fd.append("profile_photo", profilePhotoFile);   // File objects from <input type="file">
-fd.append("id_front", idFrontFile);
+fd.append("id_front", idFrontFile);              // File objects from <input type="file">
 fd.append("id_back", idBackFile);
 
 await api.post("/api/kyc/submit/", fd);          // do NOT set Content-Type yourself
@@ -133,7 +116,6 @@ function toKycFormData(sections, files) {
       else fd.append(key, v ?? "");
     });
   walk(sections, "");
-  fd.append("profile_photo", files.profilePhoto);
   fd.append("id_front", files.idFront);
   fd.append("id_back", files.idBack);
   return fd;
@@ -142,22 +124,22 @@ function toKycFormData(sections, files) {
 
 **Do not set the `Content-Type` header.** The browser must add `multipart/form-data; boundary=...` itself. The shared axios instance (`components/Api.jsx`) removes its default JSON header automatically when the body is `FormData`.
 
-**Client-side checks (save the user a wasted upload).** Read `image_max_mb` and `image_formats` from `GET /kyc/options/`: JPG, PNG, WEBP or HEIC, max 5 MB each (the server re-checks the real file content). Show a preview of each image before submit. HEIC cannot be previewed in most desktop browsers, so show a placeholder for it.
+**Client-side checks (save the user a wasted upload).** Read `image_max_mb` and `image_formats` from `GET /kyc/options/`: JPG, PNG, WEBP or HEIC, max 5 MB each (the server re-checks the real file content). Show a preview of each image before submit (the ID must be readable: remind the user to avoid glare and cropped edges). HEIC cannot be previewed in most desktop browsers, so show a placeholder for it.
 
-**Upload time.** Three images go to the image host during this request, so it can take a few seconds on slow connections. Show a progress/spinner state, disable the submit button, and use a generous timeout (the axios `onUploadProgress` callback works as usual).
+**Upload time.** Two images go to the image host during this request, so it can take a few seconds on slow connections. Show a progress/spinner state, disable the submit button, and use a generous timeout (the axios `onUploadProgress` callback works as usual).
 
 **Errors**
 
 | Status | `code` | Meaning |
 |---|---|---|
-| 400 | `validation_error` | `errors` is keyed by field. Images are keyed `profile_photo`, `id_front`, `id_back` (e.g. `{"id_front": ["The image is too large. The maximum size is 5 MB."]}`). Show each message under the matching picker |
+| 400 | `validation_error` | `errors` is keyed by field. Images are keyed `id_front` and `id_back` (e.g. `{"id_front": ["The image is too large. The maximum size is 5 MB."]}`). Show each message under the matching picker |
 | 409 | `kyc_already_pending` / `kyc_already_approved` | the user cannot submit again |
 | 415 | `unsupported_media_type` | the request was not multipart (a JSON body was sent) |
 | 429 | `throttled` | too many attempts, use `data.retry_after_seconds` |
 | 502 | `upload_failed` | the image host failed. **Nothing was saved**, let the user press submit again |
 | 503 | `upload_unavailable` | image uploads are temporarily unavailable on the server |
 
-**Locked images.** The images are saved once, with the submission. There is no endpoint to replace them. After a **rejection** the user fills the form again and uploads a new set of three images. Pre-fill the text fields from `GET /kyc/prefill/` but ask for the images again.
+**Locked images.** The images are saved once, with the submission. There is no endpoint to replace them. After a **rejection** the user fills the form again and uploads a new set of two images. Pre-fill the text fields from `GET /kyc/prefill/` but ask for the images again.
 
 **Privacy.** The ID front/back are stored **privately**. They are never reachable by a plain public link, and only the admin team can view them in the admin console.
 """
@@ -170,11 +152,10 @@ DETAIL_IMAGES_GUIDE = """
 ---
 ### Frontend notes: reading the images back
 
-`data.images` has three URLs:
+`data.images` has two URLs:
 
 | Key | What it is | Lifetime |
 |---|---|---|
-| `profile_photo_url` | the profile picture, square 256 x 256 around the face | permanent, safe to cache |
 | `id_front_url` | front of the ID document | **signed and temporary** |
 | `id_back_url` | back of the ID document | **signed and temporary** |
 
@@ -238,7 +219,6 @@ SUBMIT_MULTIPART_DOC = inline_serializer(
         "consent.privacy_notice_accepted": serializers.BooleanField(help_text="Must be true."),
         "consent.terms_accepted": serializers.BooleanField(help_text="Must be true."),
         "consent.marketing_consent": serializers.BooleanField(required=False),
-        "profile_photo": serializers.FileField(help_text="Face photo. JPG, PNG, WEBP or HEIC, max 5 MB."),
         "id_front": serializers.FileField(help_text="Front of the ID document. JPG, PNG, WEBP or HEIC, max 5 MB."),
         "id_back": serializers.FileField(help_text="Back of the ID document. JPG, PNG, WEBP or HEIC, max 5 MB."),
     },
@@ -279,8 +259,6 @@ OPTIONS_EXAMPLE = {
     },
 }
 
-_AVATAR_EXAMPLE_URL = "https://res.cloudinary.com/demo/image/upload/c_fill,g_face,h_256,w_256/solvexmarketinc/avatars/abc123"
-
 STATUS_EXAMPLE = {
     "success": True,
     "message": "Success",
@@ -290,7 +268,6 @@ STATUS_EXAMPLE = {
         "access": {
             "can_deposit": True, "can_withdraw": False, "can_trade": False, "can_request_loan": False,
         },
-        "avatar_url": None,
         "latest_submission": {
             "id": "3f6c1c0e-5b7e-4f0a-9d0b-0c6e8f7a1a11", "status": "rejected", "attempt_number": 1,
             "submitted_at": "2026-10-22T14:30:00Z", "reviewed_at": "2026-10-23T09:00:00Z",
@@ -308,7 +285,6 @@ STATUS_APPROVED_EXAMPLE = {
         "access": {
             "can_deposit": True, "can_withdraw": True, "can_trade": True, "can_request_loan": True,
         },
-        "avatar_url": _AVATAR_EXAMPLE_URL,
         "latest_submission": {
             "id": "3f6c1c0e-5b7e-4f0a-9d0b-0c6e8f7a1a11", "status": "approved", "attempt_number": 1,
             "submitted_at": "2026-10-22T14:30:00Z", "reviewed_at": "2026-10-23T09:00:00Z",
@@ -329,7 +305,6 @@ PREFILL_EXAMPLE = {
 }
 
 _IMAGES_EXAMPLE = {
-    "profile_photo_url": _AVATAR_EXAMPLE_URL,
     "id_front_url": "https://res.cloudinary.com/demo/image/authenticated/s--Ab12Cd34--/solvexmarketinc/kyc/1/front",
     "id_back_url": "https://res.cloudinary.com/demo/image/authenticated/s--Ef56Gh78--/solvexmarketinc/kyc/1/back",
 }
