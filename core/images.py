@@ -1,7 +1,7 @@
 """
 core/images.py  -  ONE place for every Cloudinary operation in the project.
 
-Used by wallet (deposit screenshots) today; reuse it for profile pictures, KYC documents, etc.
+Used by wallet (deposit screenshots), KYC (ID front/back) and profile pictures.
 
 Why server-side uploads?
     The frontend sends the file to OUR API (multipart/form-data). We validate it (size + real file
@@ -19,6 +19,10 @@ Private vs public images
 What we store in the database
     Only the Cloudinary `public_id` (a short string). URLs are generated on demand, so you can change
     sizes/transformations later without touching the data.
+
+Typical usage
+    data, kind = read_and_validate(request.FILES["id_front"])      # returns a TUPLE (bytes, type)
+    public_id = upload_image(data, folder="kyc/1", private=True)    # upload_image wants the BYTES
 """
 import io
 import logging
@@ -81,6 +85,31 @@ def read_and_validate(uploaded, *, max_mb=None):
     return data, kind
 
 
+def _as_bytes(data) -> bytes:
+    """Turn whatever the caller passed into plain bytes for upload.
+
+    Accepts:
+      * bytes / bytearray / memoryview
+      * the (bytes, kind) tuple that read_and_validate() returns (this was the cause of
+        "a bytes-like object is required, not 'tuple'")
+      * a Django UploadedFile (it is validated with read_and_validate first)
+    """
+    if isinstance(data, (tuple, list)):
+        if not data:
+            raise TypeError("upload_image() received an empty tuple")
+        data = data[0]
+
+    if hasattr(data, "read"):  # an UploadedFile / file-like object
+        data, _kind = read_and_validate(data)
+
+    if isinstance(data, (bytearray, memoryview)):
+        data = bytes(data)
+
+    if not isinstance(data, bytes):
+        raise TypeError(f"upload_image() needs image bytes, got {type(data).__name__}")
+    return data
+
+
 # --------------------------------------------------------------------------- #
 # Cloudinary operations
 # --------------------------------------------------------------------------- #
@@ -93,8 +122,14 @@ def _delivery_type(private: bool) -> str:
     return "authenticated" if private else "upload"
 
 
-def upload_image(data: bytes, *, folder: str, private: bool = True, tags=None, public_id: str = "") -> str:
-    """Upload raw image bytes and return the Cloudinary public_id (folder included)."""
+def upload_image(data, *, folder: str, private: bool = True, tags=None, public_id: str = "") -> str:
+    """Upload image bytes and return the Cloudinary public_id (folder included).
+
+    `data` should be the raw bytes. For safety it also accepts the (bytes, kind) tuple from
+    read_and_validate() or an UploadedFile, so a caller mistake no longer breaks the upload.
+    """
+    data = _as_bytes(data)  # BusinessError from validation passes through; a wrong type raises TypeError
+
     if not is_configured():
         logger.error("Cloudinary is not configured (set CLOUDINARY_URL).")
         raise BusinessError(
