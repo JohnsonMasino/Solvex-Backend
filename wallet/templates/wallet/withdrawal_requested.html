@@ -18,7 +18,7 @@
   <tr><td style="padding:6px 0;color:#6b7280;">Fee ({{ fee_percent }}%)</td><td style="padding:6px 0;">${{ fee_usd|floatformat:2 }}</td></tr>
   {% endif %}
   <tr><td style="padding:6px 0;color:#6b7280;">Total deducted</td><td style="padding:6px 0;"><strong>${{ total_usd|floatformat:2 }}</strong></td></tr>
-  <tr><td style="padding:6px 0;color:#6b7280;">You receive</td><td style="padding:6px 0;"><strong>{{ usdt_amount }} USDT</strong> (1 USDT = ${{ rate }})</td></tr>
+  <tr><td style="padding:6px 0;color:#6b7280;">You receive</td><td style="padding:6px 0;"><strong>{{ amount }} {{ asset }}</strong> (1 {{ asset }} = ${{ rate }})</td></tr>
   <tr><td style="padding:6px 0;color:#6b7280;">Network</td><td style="padding:6px 0;">{{ network_label }}</td></tr>
   <tr><td style="padding:6px 0;color:#6b7280;">Address</td><td style="padding:6px 0;font-family:monospace;word-break:break-all;">{{ withdrawal.address }}</td></tr>
 </table>

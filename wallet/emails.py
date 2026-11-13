@@ -39,21 +39,28 @@ def _deposit_context(deposit):
 def _withdrawal_context(withdrawal):
     """Extra, template-friendly values for withdrawal emails (the `withdrawal` object is still passed too).
 
-        {{ amount_usd }}     USD value the user receives
-        {{ fee_percent }}    e.g. 1.5
-        {{ fee_usd }}        fee in USD
-        {{ total_usd }}      amount_usd + fee_usd = what leaves the balance
-        {{ usdt_amount }}    exact USDT sent to the user's address
-        {{ rate }}           live USD per 1 USDT frozen at creation
-        {{ network_label }}  USDT (BEP20 – BNB Smart Chain) ...
+    Works for every payout asset (USDT / BTC / ETH). Templates should use `amount` + `asset`
+    instead of `usdt_amount` + a hardcoded "USDT":
+
+        {{ amount }} {{ asset }}  exact crypto sent to the user's address, e.g. 0.00105 BTC
+        {{ amount_usd }}          USD value the user receives
+        {{ fee_percent }}         e.g. 1.5
+        {{ fee_usd }}             fee in USD
+        {{ total_usd }}           amount_usd + fee_usd = what leaves the balance
+        {{ rate }}                live USD per 1 unit of the asset, frozen at creation
+        {{ network_label }}       USDT (BEP20 – BNB Smart Chain) / BTC (Bitcoin) / ETH (Ethereum) ...
+        {{ usdt_amount }}         DEPRECATED alias of `amount` (same value, kept so old templates don't crash)
     """
     total = withdrawal.total_usd if withdrawal.total_usd else withdrawal.usd_amount
+    amount = format(withdrawal.amount.normalize(), "f")
     return {
+        "amount": amount,
+        "asset": str(withdrawal.asset).upper(),
         "amount_usd": withdrawal.usd_amount,
         "fee_percent": format(withdrawal.fee_percent.normalize(), "f"),
         "fee_usd": withdrawal.fee_usd,
         "total_usd": total,
-        "usdt_amount": format(withdrawal.usdt_amount.normalize(), "f"),
+        "usdt_amount": amount,  # deprecated alias, see docstring
         "rate": format(withdrawal.rate.normalize(), "f"),
         "network_label": withdrawal.get_network_display(),
     }
@@ -164,7 +171,10 @@ def send_admin_new_withdrawal_email(withdrawal):
         return False
     return _notice(
         to=recipient,
-        subject=f"New withdrawal to process {withdrawal.reference}",
+        subject=(
+            f"New withdrawal to process {withdrawal.reference} "
+            f"({withdrawal.amount.normalize():f} {str(withdrawal.asset).upper()})"
+        ),
         template="wallet/admin_new_withdrawal.html",
         context={
             "withdrawal": withdrawal,

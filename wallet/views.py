@@ -81,8 +81,9 @@ class WalletConfigView(APIView):
             "for each network's asset (USDT / BTC / ETH) and the **withdrawal fee** (`withdrawal_fee_percent`, "
             "currently 1.5). Poll this endpoint every `rate_refresh_seconds` to keep the deposit and withdrawal "
             "estimates current. Available to every logged-in user, KYC or not.\n\n"
-            "`withdrawal_enabled` is `true` only for USDT networks that currently have a live rate. It says "
-            "nothing about the user's KYC status: check `access.can_withdraw` from `GET /kyc/status/` for that.\n\n"
+            "`withdrawal_enabled` is `true` for every network (USDT BEP20 / ERC20 / TRC20, BTC, ETH) that "
+            "currently has a live rate. It says nothing about the user's KYC status: check "
+            "`access.can_withdraw` from `GET /kyc/status/` for that.\n\n"
             "`screenshot_max_mb` and `screenshot_formats` describe the payment-screenshot upload limits."
             + docs.LIVE_RATE_GUIDE
             + docs.WITHDRAWAL_FEE_GUIDE
@@ -384,10 +385,11 @@ class WithdrawalListCreateView(APIView):
         tags=[TAG], summary="My withdrawals",
         description=(
             "Paginated withdrawal history, newest first. OTP data and admin notes are never exposed.\n\n"
-            "Each item includes the fee breakdown: `usd_amount` (what the user receives), `fee_percent`, `fee_usd`, "
-            "`total_usd` (= `usd_amount + fee_usd`, what leaves the balance), `usdt_amount` and the live `rate` "
-            "that was frozen at creation. Withdrawals created before fees existed have `fee_usd: \"0.00\"` and "
-            "`total_usd` equal to `usd_amount`."
+            "Each item includes the payout `asset` (`usdt` / `btc` / `eth`) and the fee breakdown: `usd_amount` "
+            "(what the user receives), `fee_percent`, `fee_usd`, `total_usd` (= `usd_amount + fee_usd`, what "
+            "leaves the balance), `amount` (exact amount of `asset` sent; `usdt_amount` is a deprecated alias with "
+            "the same value) and the live `rate` (USD per 1 unit of `asset`) that was frozen at creation. "
+            "Withdrawals created before fees existed have `fee_usd: \"0.00\"` and `total_usd` equal to `usd_amount`."
         ),
         parameters=[
             OpenApiParameter("status", str, enum=[s.value for s in WithdrawalStatus], description="Filter by status."),
@@ -412,17 +414,21 @@ class WithdrawalListCreateView(APIView):
         description=(
             "Validates the request (**KYC-approved users only**: Tier 1 users get `403 kyc_required`) and emails "
             "a one-time code. Funds are reserved only after the code "
-            "is confirmed. **Withdrawals are USDT only** (`bep20`, `erc20`, `trc20`); BTC / ETH networks are "
-            "rejected (`withdrawal_enabled` is `false` for them in the wallet config).\n\n"
-            "`usd_amount` is the USD value the user wants to **receive**. The server converts it to USDT at the "
-            "**live USDT/USD rate**, adds the **withdrawal fee** (`withdrawal_fee_percent`, currently 1.5%) on top, "
-            "and freezes everything on the withdrawal: `usd_amount`, `fee_percent`, `fee_usd`, `total_usd`, "
-            "`usdt_amount` and `rate`. The user needs `total_usd` available, and `total_usd` is what is removed "
-            "from the balance when the withdrawal is completed."
+            "is confirmed. **Withdrawals are available on every network**: USDT (`bep20`, `erc20`, `trc20`), "
+            "BTC (`btc`) and ETH (`eth`). The payout asset is decided by `network`, and `address` must be a valid "
+            "address for that network.\n\n"
+            "`usd_amount` is the USD value the user wants to **receive**. The server converts it to the payout "
+            "asset at the **live rate of that asset**, adds the **withdrawal fee** (`withdrawal_fee_percent`, "
+            "currently 1.5%) on top, and freezes everything on the withdrawal: `asset`, `usd_amount`, "
+            "`fee_percent`, `fee_usd`, `total_usd`, `amount` and `rate`. The user needs `total_usd` available, and "
+            "`total_usd` is what is removed from the balance when the withdrawal is completed."
             + docs.WITHDRAWAL_FEE_GUIDE
         ),
         request=WithdrawalCreateSerializer,
-        examples=[OpenApiExample("Valid request", value=docs.WITHDRAWAL_REQUEST, request_only=True)],
+        examples=[
+            OpenApiExample("USDT (BEP20)", value=docs.WITHDRAWAL_REQUEST, request_only=True),
+            OpenApiExample("Bitcoin", value=docs.WITHDRAWAL_REQUEST_BTC, request_only=True),
+        ],
         responses={
             201: success_response_doc(
                 "WithdrawalCreatedSuccess", "Withdrawal created; OTP emailed.", example=docs.WITHDRAWAL_CREATED_EXAMPLE,
@@ -446,9 +452,9 @@ class WithdrawalListCreateView(APIView):
             403: docs.KYC_REQUIRED,
             429: docs.THROTTLED,
             503: docs.wallet_error(
-                "The live USDT rate could not be fetched from any provider.",
+                "The live rate of the payout asset could not be fetched from any provider.",
                 {"code": "rate_unavailable",
-                 "message": "The live USDT rate is temporarily unavailable. Please try again in a moment."},
+                 "message": "The live BTC rate is temporarily unavailable. Please try again in a moment."},
             ),
         },
     )
@@ -478,7 +484,8 @@ class WithdrawalDetailView(APIView):
         description=(
             "Returns one of the caller's withdrawals. Other users' ids return 404.\n\n"
             "Show the frozen breakdown from the response and never recompute it: `usd_amount` (user receives), "
-            "`fee_usd` (`fee_percent`), `total_usd` (deducted from the balance), `usdt_amount` and `rate`."
+            "`fee_usd` (`fee_percent`), `total_usd` (deducted from the balance), `amount` + `asset` (exact crypto "
+            "sent; `usdt_amount` is a deprecated alias of `amount`) and `rate`."
         ),
         parameters=[ID_PARAM],
         responses={

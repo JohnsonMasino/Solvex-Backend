@@ -543,9 +543,10 @@ class ManualWithdrawalForm(forms.ModelForm):
         self.fields["fee_percent"].required = False
         self.fields["rate"].required = False
         self.initial["fee_percent"] = Decimal(str(settings.WITHDRAWAL_FEE_PERCENT)).quantize(Decimal("0.01"))
+        self.fields["network"].help_text = "The payout crypto follows the network (USDT / BTC / ETH)."
         self.fields["usd_amount"].help_text = "The USD value the user RECEIVES. The fee is added on top."
         self.fields["fee_percent"].help_text = "Defaults to the platform withdrawal fee. Enter 0 for no fee."
-        self.fields["rate"].help_text = "USD per 1 USDT. Leave blank to use the live rate."
+        self.fields["rate"].help_text = "USD per 1 unit of the network's crypto. Leave blank to use the live rate."
         self.fields["admin_tx_hash"].help_text = "Optional: the payout transaction hash."
         self.fields["transaction_at"].help_text = "Leave blank to use the real time."
 
@@ -571,7 +572,7 @@ class WithdrawalAdmin(ManualAddMixin, admin.ModelAdmin):
     form = WithdrawalAdminForm
     raw_id_fields = ("user",)  # only affects the change page (user is read-only there); Add uses the dropdown
 
-    # Editable in EVERY status.
+    # Editable in EVERY status. (`asset` is NOT editable: it always follows `network`.)
     EDIT_KEYS = (
         "network", "address", "usd_amount", "fee_percent", "fee_usd", "total_usd",
         "rate", "usdt_amount", "transaction_at",
@@ -579,10 +580,10 @@ class WithdrawalAdmin(ManualAddMixin, admin.ModelAdmin):
     ALWAYS_EDITABLE = EDIT_KEYS + ("admin_note",)
 
     list_display = (
-        "reference", "user_email", "network", "usd_amount", "fee_usd", "total_usd",
+        "reference", "user_email", "network", "asset", "usd_amount", "fee_usd", "total_usd",
         "usdt_amount", "status", "effective_time",
     )
-    list_filter = (WithdrawalStatusFilter, "network", "created_at")
+    list_filter = (WithdrawalStatusFilter, "asset", "network", "created_at")
     search_fields = ("reference", "user__email", "address")
     date_hierarchy = "created_at"
     ordering = ("-created_at",)
@@ -594,14 +595,16 @@ class WithdrawalAdmin(ManualAddMixin, admin.ModelAdmin):
         ("Request (editable in any status)", {
             "description": (
                 "You can change the network, address, amounts, fee and rate at any time, even after the "
-                "withdrawal is completed. Leave the derived values untouched and they are recalculated: "
-                "fee = amount x fee %, total = amount + fee, USDT = amount / rate. While PENDING, a changed "
-                "total adjusts the reserved funds (an 'adjustment' entry is added to the ledger). When "
-                "COMPLETED, the user's balance is corrected by the difference and the transaction history "
-                "is updated with the new details."
+                "withdrawal is completed. The payout crypto (USDT / BTC / ETH) follows the network; if you "
+                "switch to a network with a different crypto and leave the rate untouched, the live rate of "
+                "the new crypto is fetched. Leave the derived values untouched and they are recalculated: "
+                "fee = amount x fee %, total = amount + fee, crypto amount (the 'Usdt amount' field) = "
+                "amount / rate. While PENDING, a changed total adjusts the reserved funds (an 'adjustment' "
+                "entry is added to the ledger). When COMPLETED, the user's balance is corrected by the "
+                "difference and the transaction history is updated with the new details."
             ),
             "fields": (
-                "user_email", "reference", "network", "address",
+                "user_email", "reference", "network", "asset", "address",
                 "usd_amount", "fee_percent", "fee_usd", "total_usd",
                 "rate", "usdt_amount",
                 "confirmed_at", "expires_at",
@@ -616,9 +619,10 @@ class WithdrawalAdmin(ManualAddMixin, admin.ModelAdmin):
     add_fieldsets = (
         ("Add a withdrawal to a user's account", {
             "description": (
-                "Pick the user, network, payout address and the USD amount the user receives. The fee is "
-                "added on top. The user needs enough available balance to cover amount + fee. Tick "
-                "'Deduct from the user's balance now' to complete it immediately."
+                "Pick the user, network, payout address and the USD amount the user receives. The payout "
+                "crypto follows the network (USDT / BTC / ETH). The fee is added on top. The user needs "
+                "enough available balance to cover amount + fee. Tick 'Deduct from the user's balance now' "
+                "to complete it immediately."
             ),
             "fields": (
                 "user", "network", "address", "usd_amount", "fee_percent", "rate",
@@ -651,10 +655,10 @@ class WithdrawalAdmin(ManualAddMixin, admin.ModelAdmin):
             return "-"
         total = obj.total_usd if obj.total_usd else obj.usd_amount
         return format_html(
-            "Send exactly <strong style='font-size:1.25em'>{} USDT</strong> on <strong>{}</strong> to "
+            "Send exactly <strong style='font-size:1.25em'>{} {}</strong> on <strong>{}</strong> to "
             "<code style='user-select:all'>{}</code><br>"
             "<small>User receives ${} · fee ${} ({}%) · ${} will be deducted from their balance when completed.</small>",
-            format(obj.usdt_amount.normalize(), "f"), obj.get_network_display(), obj.address,
+            format(obj.amount.normalize(), "f"), str(obj.asset).upper(), obj.get_network_display(), obj.address,
             obj.usd_amount, obj.fee_usd, format(obj.fee_percent.normalize(), "f"), total,
         )
 
@@ -729,7 +733,7 @@ class WithdrawalAdmin(ManualAddMixin, admin.ModelAdmin):
                 messages.info(
                     request,
                     f"Withdrawal {current.reference} updated: user receives {current.usd_amount} USD "
-                    f"({current.usdt_amount.normalize():f} USDT), fee {current.fee_usd}, "
+                    f"({current.amount.normalize():f} {str(current.asset).upper()}), fee {current.fee_usd}, "
                     f"total deducted {current.total_usd}.{suffix}",
                 )
             if new_status != current.status:

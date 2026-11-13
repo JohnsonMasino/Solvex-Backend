@@ -105,6 +105,7 @@ class DepositScreenshotSerializer(serializers.Serializer):
 
 
 class WithdrawalCreateSerializer(serializers.Serializer):
+    # Any supported network: USDT (bep20 / erc20 / trc20), btc or eth. The payout asset follows the network.
     network = serializers.ChoiceField(choices=WITHDRAWAL_NETWORK_CHOICES)
     address = serializers.CharField(max_length=100)
     # The USD value the user wants to RECEIVE. The withdrawal fee is added on top of this amount.
@@ -223,23 +224,26 @@ class DepositSerializer(serializers.ModelSerializer):
 
 class WithdrawalSerializer(serializers.ModelSerializer):
     """
+    asset        = the crypto paid out: usdt / btc / eth (decided by `network`)
     usd_amount   = what the user receives (USD value)
     fee_percent  = fee rate frozen on this withdrawal
     fee_usd      = fee in USD
     total_usd    = usd_amount + fee_usd = what leaves the user's balance
-    rate         = live USD per 1 USDT, frozen at creation
-    usdt_amount  = exact USDT sent to the user's address
+    rate         = live USD per 1 unit of `asset`, frozen at creation
+    amount       = exact amount of `asset` sent to the user's address
+    usdt_amount  = DEPRECATED alias of `amount` (kept so existing clients keep working)
     created_at   = admin-chosen transaction time if set, otherwise the real creation time
     """
 
     created_at = serializers.SerializerMethodField()
+    amount = serializers.DecimalField(max_digits=24, decimal_places=8, read_only=True)
 
     class Meta:
         model = Withdrawal
         fields = (
-            "id", "reference", "status", "network", "address",
+            "id", "reference", "status", "network", "asset", "address",
             "usd_amount", "fee_percent", "fee_usd", "total_usd",
-            "usdt_amount", "rate", "expires_at", "confirmed_at", "admin_tx_hash",
+            "amount", "usdt_amount", "rate", "expires_at", "confirmed_at", "admin_tx_hash",
             "failure_reason", "created_at", "processed_at",
         )
         read_only_fields = fields

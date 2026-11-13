@@ -1,7 +1,7 @@
 """
 wallet/rates.py - live USD prices for the wallet assets (USDT, BTC, ETH).
 
-Used for BOTH deposits (asset -> USD) and withdrawals (USD -> USDT).
+Used for BOTH deposits (asset -> USD) and withdrawals (USD -> asset, on every network).
 
 All providers below are free and need NO API key. They are tried in order and each one only
 fills the assets that earlier providers did not return, so a single dead provider never blocks
