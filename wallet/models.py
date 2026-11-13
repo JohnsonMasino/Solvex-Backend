@@ -53,9 +53,12 @@ NETWORK_ASSET = {
 # Max decimal places we accept / store per asset.
 ASSET_DECIMALS = {Asset.USDT: 6, Asset.BTC: 8, Asset.ETH: 8}
 
-# Withdrawals are still paid out in USDT only.
+# The USDT networks (kept because other code may import it).
 USDT_NETWORKS = (Network.BEP20, Network.ERC20, Network.TRC20)
-WITHDRAWAL_NETWORK_CHOICES = [(n.value, n.label) for n in USDT_NETWORKS]
+
+# Withdrawals are paid out on EVERY network we accept deposits on: USDT (BEP20 / ERC20 / TRC20), BTC and ETH.
+WITHDRAWAL_NETWORKS = tuple(Network)
+WITHDRAWAL_NETWORK_CHOICES = [(n.value, n.label) for n in WITHDRAWAL_NETWORKS]
 
 # Address format per network (used for withdrawal addresses AND the admin-managed deposit addresses).
 ADDRESS_REGEX = {
@@ -312,12 +315,14 @@ class Withdrawal(UUIDModel, TimeStampedModel):
     """
     Money model (all frozen at creation, admin can edit while the withdrawal is `pending`):
 
-        usd_amount   USD value the user RECEIVES (paid out in USDT)
+        asset        the crypto paid out (usdt / btc / eth), decided by `network`
+        usd_amount   USD value the user RECEIVES (paid out in `asset`)
         fee_percent  fee rate applied (e.g. 1.50)
         fee_usd      usd_amount x fee_percent / 100, rounded to cents
         total_usd    usd_amount + fee_usd  -> the amount reserved, then removed from the user's balance
-        rate         live USD per 1 USDT at creation
-        usdt_amount  usd_amount / rate     -> exact USDT the admin must send
+        rate         live USD per 1 unit of `asset` at creation
+        usdt_amount  usd_amount / rate     -> exact amount of `asset` the admin must send.
+                     (Column name kept for backwards compatibility; read it as `amount`.)
     """
 
     Status = WithdrawalStatus
@@ -325,13 +330,21 @@ class Withdrawal(UUIDModel, TimeStampedModel):
     user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.PROTECT, related_name="withdrawals")
     reference = models.CharField(max_length=20, unique=True)
     network = models.CharField(max_length=10, choices=WITHDRAWAL_NETWORK_CHOICES)
+    asset = models.CharField(max_length=10, choices=Asset.choices, default=Asset.USDT)
     address = models.CharField(max_length=100)
     usd_amount = models.DecimalField(max_digits=18, decimal_places=2)
     fee_percent = models.DecimalField(max_digits=5, decimal_places=2, default=0)
     fee_usd = models.DecimalField(max_digits=18, decimal_places=2, default=0)
     total_usd = models.DecimalField(max_digits=18, decimal_places=2, default=0)
-    rate = models.DecimalField(max_digits=18, decimal_places=6)
-    usdt_amount = models.DecimalField(max_digits=24, decimal_places=6, help_text="Exact USDT the admin must send.")
+    rate = models.DecimalField(
+        max_digits=18, decimal_places=6,
+        help_text="USD per 1 unit of the asset (USDT / BTC / ETH), frozen at creation.",
+    )
+    usdt_amount = models.DecimalField(
+        max_digits=24, decimal_places=8,
+        help_text="Exact amount of the payout crypto (USDT / BTC / ETH) the admin must send. "
+                  "Column name kept for backwards compatibility.",
+    )
     status = models.CharField(
         max_length=15, choices=WithdrawalStatus.choices, default=WithdrawalStatus.AWAITING_OTP, db_index=True
     )
@@ -370,3 +383,8 @@ class Withdrawal(UUIDModel, TimeStampedModel):
     def effective_at(self):
         """The date/time shown to the user: the admin override if set, else the real creation time."""
         return self.transaction_at or self.created_at
+
+    @property
+    def amount(self):
+        """Exact amount of `asset` to send. Same value as the legacy `usdt_amount` column."""
+        return self.usdt_amount

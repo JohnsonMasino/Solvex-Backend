@@ -45,20 +45,20 @@ ACCESS_GUIDE = """
 LIVE_RATE_GUIDE = """
 
 ---
-### Frontend notes: live rates & multi-asset deposits
+### Frontend notes: live rates & multi-asset deposits and withdrawals
 
 **What changed**
-- Deposits support **five networks / three assets**: `bep20`, `erc20`, `trc20` (USDT), `btc` (BTC), `eth` (ETH).
+- Deposits and withdrawals both support **five networks / three assets**: `bep20`, `erc20`, `trc20` (USDT), `btc` (BTC), `eth` (ETH).
 - USD rates are **not fixed**. For USDT, BTC and ETH the backend uses the **live market price** at the moment a request is made. The server tries several free price providers in order (CoinGecko, CryptoCompare, Coinbase, Kraken, Bitstamp), so one provider being down does not break anything. Prices are cached on the server for `rate_refresh_seconds`.
 - Deposit request body: send **`amount`** (in the asset's own units) instead of `usdt_amount`. `usdt_amount` is still accepted on USDT networks for now but is deprecated.
 - Deposit responses: `usdt_amount` is replaced by **`amount`** plus **`asset`** (`usdt` | `btc` | `eth`). `rate` is *USD per 1 unit of `asset`*.
-- **Withdrawals now use the live USDT rate too, and charge a fee.** See the "Withdrawals" notes on the withdrawal endpoints. Withdrawals are still USDT only (`withdrawal_enabled` is `false` for `btc` / `eth`).
+- **Withdrawals use the live rate of the payout asset too, work on all five networks, and charge a fee.** See the "Withdrawals" notes on the withdrawal endpoints. `withdrawal_enabled` is `true` for every network that currently has a live rate.
 
 **How to handle the live rate**
-1. Load the wallet config when the deposit screen opens, then **re-fetch it every `rate_refresh_seconds`** (default 30) while the screen is visible. Pause polling when the tab is hidden. Do not cache rates in localStorage.
+1. Load the wallet config when the deposit or withdrawal screen opens, then **re-fetch it every `rate_refresh_seconds`** (default 30) while the screen is visible. Pause polling when the tab is hidden. Do not cache rates in localStorage.
 2. Show the user an **estimate**: `usd ≈ amount × networks[].rate`. Label it "Estimated" and show `rate_updated_at` ("Rate updated 12s ago").
 3. **The server's rate is the one that counts.** `POST` re-prices at submit time and freezes the result. Always show `data.rate` and `data.usd_amount` from the response on the confirmation screen and deposit detail, and never recompute them client-side. Tell the user the final USD credit can differ slightly from the estimate.
-4. **Per-network switches:** if `deposit_enabled` is `false` (no company address or no live rate right now), disable that network and show "Temporarily unavailable". `rate` / `rate_updated_at` are `null` in that case.
+4. **Per-network switches:** if `deposit_enabled` is `false` (no company address or no live rate right now), disable that network for deposits and show "Temporarily unavailable". If `withdrawal_enabled` is `false` (no live rate right now), do the same for withdrawals. `rate` / `rate_updated_at` are `null` in that case.
 5. **Errors to handle on `POST` deposit:**
    - `503 rate_unavailable`: the live rate couldn't be fetched. Show "Rate temporarily unavailable, please try again in a moment" and let the user retry. Do not treat it as a fatal error.
    - `400 deposit_below_minimum`: the minimum is checked in USD **at the live rate**, so an amount close to the minimum can flip between valid and invalid. Show the server message.
@@ -149,46 +149,50 @@ await axios.post(`/wallet/deposits/${depositId}/screenshot/`, form);   // do not
 """
 
 # ---------------------------------------------------------------------------
-# Frontend guide: withdrawals (live rate + fee)
+# Frontend guide: withdrawals (multi-asset, live rate + fee)
 # ---------------------------------------------------------------------------
 WITHDRAWAL_FEE_GUIDE = """
 
 ---
-### Frontend notes: withdrawal fee & live USDT rate
+### Frontend notes: multi-asset withdrawals, withdrawal fee & live rate
 
 **Withdrawals require approved KYC.** Users who haven't been approved get `403 kyc_required`. Use `access.can_withdraw` from `GET /kyc/status/` to decide whether to show the withdrawal form or a "Complete verification" prompt.
 
 **What changed**
-- Every withdrawal now carries a **fee** (`withdrawal_fee_percent` in the wallet config, currently **1.5%**). The fee is **added on top** of the amount the user wants to receive.
-- The USDT/USD rate is **live** (no longer a fixed 1:1 peg). It is the same `networks[].rate` the config returns for the USDT networks (`bep20`, `erc20`, `trc20`), and it is frozen on the withdrawal when the request is created.
-- Withdrawal objects have three new fields: `fee_percent`, `fee_usd`, `total_usd`.
+- Withdrawals now work on **all five networks**: `bep20`, `erc20`, `trc20` (paid in USDT), `btc` (paid in BTC) and `eth` (paid in ETH). The payout asset is decided by `network`.
+- Every withdrawal carries a **fee** (`withdrawal_fee_percent` in the wallet config, currently **1.5%**). The fee is **added on top** of the amount the user wants to receive.
+- The rate is **live** and is the same `networks[].rate` the config returns for the chosen network. It is *USD per 1 unit of the payout asset* and is frozen on the withdrawal when the request is created.
+- Withdrawal objects have new fields: `asset`, `amount`, `fee_percent`, `fee_usd`, `total_usd`.
+- `usdt_amount` is **deprecated**. It still exists and holds the same value as `amount`, but for BTC / ETH withdrawals it is NOT a USDT figure. Read `amount` + `asset` instead.
 
 **What each field means**
 
 | Field | Meaning | Show it as |
 |---|---|---|
+| `asset` | Crypto paid out: `usdt`, `btc` or `eth` | "You receive ... BTC" |
 | `usd_amount` | USD value the user **receives** (what they typed in) | "You receive (USD)" |
-| `usdt_amount` | Exact USDT sent to their address (`usd_amount ÷ rate`) | "You receive ≈ X USDT" |
+| `amount` | Exact amount of `asset` sent to their address (`usd_amount ÷ rate`) | "You receive ≈ 0.00105 BTC" |
 | `fee_percent` | Fee rate applied, e.g. `1.50` | "Fee (1.5%)" |
 | `fee_usd` | Fee in USD (`usd_amount × fee_percent ÷ 100`, rounded to 2 decimals) | "Fee" |
 | `total_usd` | `usd_amount + fee_usd`. This is the amount that **leaves the user's balance** | "Total deducted from balance" |
-| `rate` | Live USD per 1 USDT used for this withdrawal | "Rate: 1 USDT = $1.0002" |
+| `rate` | Live USD per 1 unit of `asset` used for this withdrawal | "Rate: 1 BTC = $95,123.45" |
 
-Example: the user enters `100.00` with a 1.5% fee. They receive `100.00` USD worth of USDT, the fee is `1.50`, and `101.50` is deducted from their balance.
+Example: the user enters `100.00` with a 1.5% fee on the `btc` network. They receive `100.00` USD worth of BTC, the fee is `1.50`, and `101.50` is deducted from their balance.
 
 **Withdrawal form (before submitting)**
-1. Load the wallet config. Read `withdrawal_fee_percent`, `min_withdrawal_usd` and the USDT network's `rate`. Re-fetch every `rate_refresh_seconds` while the screen is visible.
-2. As the user types `usd_amount`, show an **estimate**:
+1. Load the wallet config. Read `withdrawal_fee_percent`, `min_withdrawal_usd` and the chosen network's `rate`, `decimals` and `address_regex`. Re-fetch every `rate_refresh_seconds` while the screen is visible.
+2. Validate the address with the chosen network's `address_regex`. USDT BEP20, USDT ERC20 and ETH share the same `0x...` format, so make sure the user picked the right network.
+3. As the user types `usd_amount`, show an **estimate**:
    - `fee ≈ usd_amount × withdrawal_fee_percent ÷ 100` (2 decimals)
    - `total ≈ usd_amount + fee`
-   - `usdt ≈ usd_amount ÷ rate`
+   - `amount ≈ usd_amount ÷ rate` (rounded down to the network's `decimals`)
    Label these "Estimated". The server's figures are final.
-3. Validate locally for convenience only: `usd_amount >= min_withdrawal_usd` (the minimum applies to the amount the user **receives**, not to the total) and `total <= available_balance`.
-4. **"Max" button:** the largest amount the user can receive is a bit less than their available balance because of the fee. Start from `available_balance ÷ (1 + withdrawal_fee_percent ÷ 100)`, round down to 2 decimals, and if `amount + fee` still exceeds `available_balance`, subtract 0.01 until it fits.
-5. If a network has `withdrawal_enabled: false` (BTC/ETH, or no live USDT rate right now), disable it.
+4. Validate locally for convenience only: `usd_amount >= min_withdrawal_usd` (the minimum applies to the amount the user **receives**, not to the total) and `total <= available_balance`.
+5. **"Max" button:** the largest amount the user can receive is a bit less than their available balance because of the fee. Start from `available_balance ÷ (1 + withdrawal_fee_percent ÷ 100)`, round down to 2 decimals, and if `amount + fee` still exceeds `available_balance`, subtract 0.01 until it fits.
+6. If a network has `withdrawal_enabled: false` (no live rate for its asset right now), disable it and show "Temporarily unavailable".
 
 **After `POST /wallet/withdrawals/` (OTP screen)**
-- Show the **server's** values from `data`: `usd_amount`, `fee_usd` (with `fee_percent`), `total_usd`, `usdt_amount` and `rate`. **Never recompute them client-side**; they are frozen.
+- Show the **server's** values from `data`: `usd_amount`, `fee_usd` (with `fee_percent`), `total_usd`, `amount` + `asset` and `rate`. **Never recompute them client-side**; they are frozen.
 - Make it clear the user is confirming a total deduction of `total_usd`.
 - `expires_at` is the deadline to enter the code. After the OTP is confirmed, nothing is re-priced.
 
@@ -200,11 +204,12 @@ Example: the user enters `100.00` with a 1.5% fee. They receive `100.00` USD wor
 
 **Errors to handle**
 - `403 kyc_required` on `POST /wallet/withdrawals/`: the user's KYC isn't approved. Send them to the KYC page.
-- `503 rate_unavailable` on `POST /wallet/withdrawals/`: the live rate couldn't be fetched. Show "Rate temporarily unavailable, please try again in a moment" and allow a retry.
+- `503 rate_unavailable` on `POST /wallet/withdrawals/`: the live rate of the payout asset couldn't be fetched. Show "Rate temporarily unavailable, please try again in a moment" and allow a retry.
+- `400 invalid_address`: the address doesn't match the chosen network's format.
 - `400 withdrawal_below_minimum`: `usd_amount` is below `min_withdrawal_usd`.
 - `400 insufficient_balance` / `400 funds_in_use`: the **total including the fee** doesn't fit. `data` contains the balances plus `total_usd` (what was needed). Show e.g. "You need $101.50 (amount + $1.50 fee) but only $90.00 is available."
 
-**Older withdrawals:** withdrawals created before the fee existed return `fee_percent: "0.00"`, `fee_usd: "0.00"` and `total_usd` equal to `usd_amount`. Render them the same way (hide the fee line if `fee_usd` is `"0.00"` if you prefer).
+**Older withdrawals:** withdrawals created before multi-asset support have `asset: "usdt"` and keep their original values. Withdrawals created before the fee existed return `fee_percent: "0.00"`, `fee_usd: "0.00"` and `total_usd` equal to `usd_amount`. Render them the same way (hide the fee line if `fee_usd` is `"0.00"` if you prefer).
 """
 
 # ---------------------------------------------------------------------------
@@ -318,8 +323,9 @@ CONFIG_EXAMPLE = {
             {"value": "btc", "label": "BTC (Bitcoin)", "asset": "btc", "decimals": 8,
              "rate": "95123.450000", "rate_updated_at": "2026-10-22T14:29:48+00:00",
              "deposit_address": "bc1qexampleaddressxxxxxxxxxxxxxxxxxxxxxxxx",
-             "deposit_enabled": True, "withdrawal_enabled": False,
+             "deposit_enabled": True, "withdrawal_enabled": True,
              "address_regex": "^(bc1[02-9ac-hj-np-z]{11,71}|[13][a-km-zA-HJ-NP-Z1-9]{25,34})$"},
+            # No live rate right now: both deposits and withdrawals are disabled for this network.
             {"value": "eth", "label": "ETH (Ethereum)", "asset": "eth", "decimals": 8,
              "rate": None, "rate_updated_at": None,
              "deposit_address": "0x1234567890abcdef1234567890abcdef12345678",
@@ -379,15 +385,20 @@ DEPOSIT_LIST_EXAMPLE = {
 }
 
 # `usd_amount` is what the user wants to RECEIVE. The 1.5% fee is added on top by the server.
+# The payout asset follows `network` (bep20 / erc20 / trc20 -> USDT, btc -> BTC, eth -> ETH).
 WITHDRAWAL_REQUEST = {
     "network": "bep20", "address": "0x1234567890abcdef1234567890abcdef12345678", "usd_amount": "100.00",
 }
-# 100.00 requested -> fee 1.50 (1.5%) -> 101.50 deducted from the balance; rate is the live USDT price.
+WITHDRAWAL_REQUEST_BTC = {
+    "network": "btc", "address": "bc1qexampleaddressxxxxxxxxxxxxxxxxxxxxxxxx", "usd_amount": "100.00",
+}
+# 100.00 requested -> fee 1.50 (1.5%) -> 101.50 deducted from the balance; rate is the live price
+# of the payout asset (USD per 1 USDT here). `usdt_amount` is a deprecated alias of `amount`.
 WITHDRAWAL_DATA = {
     "id": "c2d3e4f5-0a1b-4c2d-8e3f-9a0b1c2d3e4f", "reference": "WDR-AB12CD34", "status": "awaiting_otp",
-    "network": "bep20", "address": "0x1234567890abcdef1234567890abcdef12345678",
+    "network": "bep20", "asset": "usdt", "address": "0x1234567890abcdef1234567890abcdef12345678",
     "usd_amount": "100.00", "fee_percent": "1.50", "fee_usd": "1.50", "total_usd": "101.50",
-    "usdt_amount": "99.980003", "rate": "1.000200",
+    "amount": "99.98000300", "usdt_amount": "99.98000300", "rate": "1.000200",
     "expires_at": "2026-10-22T14:35:00Z", "confirmed_at": None, "admin_tx_hash": None,
     "failure_reason": None, "created_at": "2026-10-22T14:30:00Z", "processed_at": None,
 }

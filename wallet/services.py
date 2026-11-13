@@ -18,7 +18,7 @@ that moment (see wallet/rates.py).
 Company deposit addresses are NOT in settings / env any more: they live in the admin-managed
 DepositAddressSettings row (admin > Wallet > Deposit addresses).
 
-PAYMENT SCREENSHOT (new)
+PAYMENT SCREENSHOT
     After creating a deposit the user pays, then:
         attach_deposit_screenshot(user, deposit_id, file)  -> uploads the image to Cloudinary (private,
                                                               signed-URL only) and stores its public_id.
@@ -30,16 +30,18 @@ PAYMENT SCREENSHOT (new)
     depends on the screenshot (admin discretion, and manual admin deposits have none); the admin
     page simply warns when a deposit has no proof.
 
-Withdrawals are paid in USDT only (BEP20 / ERC20 / TRC20) and ALSO use the live USDT/USD rate,
-frozen at creation. A withdrawal fee (settings.WITHDRAWAL_FEE_PERCENT, default 1.5%) is added on
-top of the amount the user asked to receive:
+Withdrawals are paid out on the SAME five networks as deposits: USDT (BEP20 / ERC20 / TRC20), BTC and
+ETH. The payout asset follows the network and the LIVE rate of that asset (USD per 1 unit) is frozen
+at creation. A withdrawal fee (settings.WITHDRAWAL_FEE_PERCENT, default 1.5%) is added on top of the
+amount the user asked to receive:
 
     usd_amount   what the user receives (USD value)
     fee_usd      usd_amount x fee_percent / 100
     total_usd    usd_amount + fee_usd  -> reserved when the OTP is confirmed, removed from the
                                           balance when an admin marks the withdrawal completed,
                                           released in full (fee included) if it fails
-    usdt_amount  usd_amount / live USDT rate -> exact USDT the admin sends
+    usdt_amount  usd_amount / live rate of the asset -> exact amount of the asset the admin sends
+                 (column name kept for backwards compatibility; exposed as `amount` + `asset`)
 
 ADMIN EDITS (any status)
     Admins can edit a deposit or withdrawal in ANY status.
@@ -74,7 +76,7 @@ from core.utils import usdt as to_usdt
 
 from . import emails, rates
 from .models import (
-    ADDRESS_FIELDS, ADDRESS_REGEX, ASSET_DECIMALS, NETWORK_ASSET, USDT_NETWORKS,
+    ADDRESS_FIELDS, ADDRESS_REGEX, ASSET_DECIMALS, NETWORK_ASSET, WITHDRAWAL_NETWORKS,
     Asset, Deposit, DepositAddressSettings, DepositStatus, EntryType, Network, Wallet,
     WalletTransaction, Withdrawal, WithdrawalStatus, generate_reference,
 )
@@ -371,6 +373,15 @@ def _quantize_amount(asset, value) -> Decimal:
     return Decimal(str(value)).quantize(Decimal(10) ** -places, rounding=ROUND_DOWN)
 
 
+def _payout_amount(asset, usd_amount, rate) -> Decimal:
+    """Exact amount of `asset` to send for a withdrawal: usd_amount / rate, rounded DOWN to the
+    asset's precision. USDT keeps using the project's existing `usdt` helper."""
+    raw = Decimal(usd_amount) / Decimal(rate)
+    if Asset(asset) == Asset.USDT:
+        return to_usdt(raw)
+    return _quantize_amount(asset, raw)
+
+
 def get_config() -> dict:
     networks = []
     fetched = []
@@ -391,8 +402,8 @@ def get_config() -> dict:
             "rate_updated_at": quote.fetched_at.isoformat() if quote else None,
             "deposit_address": address,
             "deposit_enabled": bool(address and quote),
-            # Withdrawals are USDT-only and need a live USDT rate.
-            "withdrawal_enabled": bool(network in USDT_NETWORKS and quote),
+            # Withdrawals are available on every network that currently has a live rate.
+            "withdrawal_enabled": bool(network in WITHDRAWAL_NETWORKS and quote),
             "address_regex": ADDRESS_REGEX[network],
         })
     usdt_quote = rates.get_quote_or_none(Asset.USDT)
@@ -791,7 +802,7 @@ def decline_deposit(deposit, admin_user, reason="") -> None:
 
 
 # --------------------------------------------------------------------------- #
-# Withdrawals (user side) - USDT only, live rate, fee on top
+# Withdrawals (user side) - USDT / BTC / ETH, live rate, fee on top
 # --------------------------------------------------------------------------- #
 def validate_address(network, address) -> str:
     address = (address or "").strip()
@@ -824,16 +835,25 @@ def _otp_expiry():
     return timezone.now() + timedelta(minutes=settings.PENDING_TRANSACTION_EXPIRY_MINUTES)
 
 
+def _assert_withdrawal_network(network) -> Network:
+    network = Network(network)
+    if network not in WITHDRAWAL_NETWORKS:
+        raise BusinessError(
+            "withdrawal_network_unsupported",
+            "Withdrawals are not available on this network.",
+            status=400,
+        )
+    return network
+
+
 def create_withdrawal(user, network, address, usd_amount):
     """Returns (withdrawal, otp_sent). Funds are NOT reserved until the OTP is confirmed.
 
-    `usd_amount` is what the user wants to RECEIVE; the fee is added on top (total_usd)."""
-    if Network(network) not in USDT_NETWORKS:
-        raise BusinessError(
-            "withdrawal_network_unsupported",
-            "Withdrawals are only available in USDT (BEP20, ERC20 or TRC20).",
-            status=400,
-        )
+    `usd_amount` is what the user wants to RECEIVE; the fee is added on top (total_usd).
+    The payout asset (USDT / BTC / ETH) is decided by `network`."""
+    network = _assert_withdrawal_network(network)
+    asset = NETWORK_ASSET[network]
+
     usd_amount = money(usd_amount)
     min_withdrawal = money(settings.MIN_WITHDRAWAL_AMOUNT)
     if usd_amount < min_withdrawal:
@@ -846,7 +866,7 @@ def create_withdrawal(user, network, address, usd_amount):
     from loan import services as loan_services
     loan_services.assert_can_withdraw(user)
 
-    rate = rates.get_quote(Asset.USDT).rate  # live USDT/USD rate (503 rate_unavailable if none)
+    rate = rates.get_quote(asset).rate  # live rate of the payout asset (503 rate_unavailable if none)
     amounts = calculate_withdrawal_amounts(usd_amount)
     otp = generate_otp()
     now = timezone.now()
@@ -862,14 +882,15 @@ def create_withdrawal(user, network, address, usd_amount):
         withdrawal = Withdrawal(
             user=user,
             reference=_new_reference(Withdrawal, "WDR-"),
-            network=network,
+            network=network.value,
+            asset=asset.value,
             address=address,
             usd_amount=amounts["usd_amount"],
             fee_percent=amounts["fee_percent"],
             fee_usd=amounts["fee_usd"],
             total_usd=amounts["total_usd"],
             rate=rate,
-            usdt_amount=to_usdt(amounts["usd_amount"] / rate),
+            usdt_amount=_payout_amount(asset, amounts["usd_amount"], rate),
             status=WithdrawalStatus.AWAITING_OTP,
             otp_expires_at=expires_at,
             otp_last_sent_at=now,
@@ -1017,10 +1038,13 @@ def admin_update_withdrawal(withdrawal, changes: dict) -> Withdrawal:
     `changes` holds ONLY the fields the admin actually changed, any of:
         network, address, usd_amount, fee_percent, fee_usd, total_usd, rate, usdt_amount, transaction_at
 
-    Derived values follow whatever the admin did NOT type in by hand:
+    The payout asset is derived from `network`. Derived values follow whatever the admin did NOT type
+    in by hand:
+      * rate        = live rate of the new asset            (when the network changed to a different
+                                                             asset and no rate was typed)
       * fee_usd     = usd_amount x fee_percent / 100          (when usd_amount or fee_percent changed)
       * total_usd   = usd_amount + fee_usd                    (when usd_amount, fee_percent or fee_usd changed)
-      * usdt_amount = usd_amount / rate                       (when usd_amount or rate changed)
+      * usdt_amount = usd_amount / rate (the payout amount)   (when usd_amount, rate or the asset changed)
 
     Money effects by status:
       * awaiting_otp                     -> nothing reserved yet; the new values are used on confirmation.
@@ -1039,17 +1063,21 @@ def admin_update_withdrawal(withdrawal, changes: dict) -> Withdrawal:
 
         old_total = _total_usd(w)
 
-        network = Network(changes.get("network", w.network))
-        if network not in USDT_NETWORKS:
-            raise BusinessError(
-                "withdrawal_network_unsupported",
-                "Withdrawals are only available in USDT (BEP20, ERC20 or TRC20).",
-            )
+        network = _assert_withdrawal_network(changes.get("network", w.network))
+        asset = NETWORK_ASSET[network]
+        asset_changed = asset.value != w.asset
+
         address = w.address
         if "address" in changes or "network" in changes:
             address = validate_address(network, changes.get("address", w.address))
 
-        rate = Decimal(changes.get("rate", w.rate))
+        if "rate" in changes:
+            rate = Decimal(changes["rate"])
+        elif asset_changed:
+            rate = rates.get_quote(asset).rate  # 503 rate_unavailable -> admin can type the rate manually
+        else:
+            rate = Decimal(w.rate)
+        rate = Decimal(rate).quantize(RATE_Q)
         if rate <= 0:
             raise BusinessError("invalid_amount", "Rate must be greater than zero.")
 
@@ -1081,24 +1109,25 @@ def admin_update_withdrawal(withdrawal, changes: dict) -> Withdrawal:
             raise BusinessError("invalid_amount", "Total must be greater than zero.")
 
         if "usdt_amount" in changes:
-            usdt_amount = changes["usdt_amount"]
-        elif "usd_amount" in changes or "rate" in changes:
-            usdt_amount = to_usdt(usd_amount / rate)
+            payout = _quantize_amount(asset, changes["usdt_amount"])
+        elif "usd_amount" in changes or "rate" in changes or asset_changed:
+            payout = _payout_amount(asset, usd_amount, rate)
         else:
-            usdt_amount = w.usdt_amount
-        if Decimal(usdt_amount) <= 0:
-            raise BusinessError("invalid_amount", "USDT amount must be greater than zero.")
+            payout = w.usdt_amount
+        if Decimal(payout) <= 0:
+            raise BusinessError("invalid_amount", f"{asset.label} amount must be greater than zero.")
 
         delta = money(total_usd - old_total)
 
         w.network = network.value
+        w.asset = asset.value
         w.address = address
         w.rate = rate
         w.usd_amount = usd_amount
         w.fee_percent = fee_percent
         w.fee_usd = fee_usd
         w.total_usd = total_usd
-        w.usdt_amount = usdt_amount
+        w.usdt_amount = payout
         if "transaction_at" in changes:
             w.transaction_at = changes["transaction_at"]
 
@@ -1140,7 +1169,7 @@ def admin_update_withdrawal(withdrawal, changes: dict) -> Withdrawal:
                 )
 
         w.save(update_fields=[
-            "network", "address", "rate", "usd_amount", "fee_percent", "fee_usd",
+            "network", "asset", "address", "rate", "usd_amount", "fee_percent", "fee_usd",
             "total_usd", "usdt_amount", "transaction_at", "updated_at",
         ])
     return w
@@ -1152,17 +1181,16 @@ def admin_create_withdrawal(
 ) -> Withdrawal:
     """Admin manually adds a withdrawal to a user's account (no OTP step).
 
-    `usd_amount` is what the user RECEIVES; the fee is added on top. A blank `fee_percent` uses
-    settings.WITHDRAWAL_FEE_PERCENT and a blank `rate` uses the live USDT rate. The funds
-    (amount + fee) are reserved immediately and the user must have enough available balance.
-    With `complete=True` the withdrawal is completed straight away (balance reduced, ledger row
-    written, user emailed); otherwise it stays pending in the admin queue.
+    `usd_amount` is what the user RECEIVES; the fee is added on top. The payout asset follows
+    `network` (USDT / BTC / ETH). A blank `fee_percent` uses settings.WITHDRAWAL_FEE_PERCENT and a
+    blank `rate` uses the live rate of that asset. The funds (amount + fee) are reserved immediately
+    and the user must have enough available balance. With `complete=True` the withdrawal is completed
+    straight away (balance reduced, ledger row written, user emailed); otherwise it stays pending in
+    the admin queue.
     """
-    if Network(network) not in USDT_NETWORKS:
-        raise BusinessError(
-            "withdrawal_network_unsupported",
-            "Withdrawals are only available in USDT (BEP20, ERC20 or TRC20).",
-        )
+    network = _assert_withdrawal_network(network)
+    asset = NETWORK_ASSET[network]
+
     usd_amount = money(usd_amount)
     if usd_amount <= 0:
         raise BusinessError("invalid_amount", "USD amount must be greater than zero.")
@@ -1174,7 +1202,7 @@ def admin_create_withdrawal(
             raise BusinessError("invalid_amount", "Fee percent must be between 0 and 100.")
 
     if rate is None:
-        rate = rates.get_quote(Asset.USDT).rate  # 503 rate_unavailable -> admin can type a rate instead
+        rate = rates.get_quote(asset).rate  # 503 rate_unavailable -> admin can type a rate instead
     rate = Decimal(rate).quantize(RATE_Q)
     if rate <= 0:
         raise BusinessError("invalid_amount", "Rate must be greater than zero.")
@@ -1189,14 +1217,15 @@ def admin_create_withdrawal(
         w = Withdrawal.objects.create(
             user=user,
             reference=_new_reference(Withdrawal, "WDR-"),
-            network=Network(network).value,
+            network=network.value,
+            asset=asset.value,
             address=address,
             usd_amount=amounts["usd_amount"],
             fee_percent=amounts["fee_percent"],
             fee_usd=amounts["fee_usd"],
             total_usd=amounts["total_usd"],
             rate=rate,
-            usdt_amount=to_usdt(amounts["usd_amount"] / rate),
+            usdt_amount=_payout_amount(asset, amounts["usd_amount"], rate),
             status=WithdrawalStatus.PENDING,
             expires_at=now,
             confirmed_at=now,
