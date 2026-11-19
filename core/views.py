@@ -22,32 +22,37 @@ class HealthView(APIView):
 
     @extend_schema(
         tags=["System"], summary="Health check", auth=[],
-        description="Pings the database and returns service status. Public, unthrottled; used by Uptime Robot.",
+        description=(
+            "Liveness probe used by Uptime Robot. Does NOT touch the database by default, "
+            "so it doesn't keep the serverless DB awake. Add ?deep=1 to also ping the database."
+        ),
         responses={
             200: success_response_doc(
-                "HealthOk", "Service and database are healthy.", message="OK",
+                "HealthOk", "Service is healthy.", message="OK",
                 example={"success": True, "message": "OK",
-                         "data": {"status": "ok", "database": "ok", "time": "2026-10-22T14:30:00Z"}}),
-            503: error_response_doc("Database unreachable.", code="service_unavailable",
-                                    message="Service unavailable"),
+                         "data": {"status": "ok", "time": "2026-10-22T14:30:00Z"}}),
+            503: error_response_doc("Database unreachable (deep check only).",
+                                    code="service_unavailable", message="Service unavailable"),
         },
     )
     def get(self, request):
-        try:
-            with connection.cursor() as cursor:
-                cursor.execute("SELECT 1")
-                cursor.fetchone()
-        except Exception:
-            logger.exception("health: database check failed")
-            return Response(
-                error_payload("Service unavailable", "service_unavailable",
-                              data={"status": "degraded", "database": "error"}),
-                status=503,
-            )
-        return success_response(
-            {"status": "ok", "database": "ok", "time": timezone.now().strftime("%Y-%m-%dT%H:%M:%SZ")},
-            message="OK",
-        )
+        data = {"status": "ok", "time": timezone.now().strftime("%Y-%m-%dT%H:%M:%SZ")}
+
+        if request.query_params.get("deep") == "1":
+            try:
+                with connection.cursor() as cursor:
+                    cursor.execute("SELECT 1")
+                    cursor.fetchone()
+                data["database"] = "ok"
+            except Exception:
+                logger.exception("health: database check failed")
+                return Response(
+                    error_payload("Service unavailable", "service_unavailable",
+                                  data={"status": "degraded", "database": "error"}),
+                    status=503,
+                )
+
+        return success_response(data, message="OK")
 
 
 # JSON handlers for URLs that never reach DRF (used when DEBUG=False; see config/urls.py)
