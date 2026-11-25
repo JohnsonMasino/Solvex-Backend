@@ -95,7 +95,9 @@ class ManualAddMixin:
 
     The record is created through the service layer (never through a plain model save), so if the
     service refuses (rate unavailable, insufficient funds, duplicate hash...) we show the error and
-    send the admin back to the empty add page instead of crashing."""
+    send the admin back to the empty add page instead of crashing.
+
+    It also enables a SILENT delete (single or bulk) for superusers: see has_delete_permission."""
 
     def log_addition(self, request, obj, message):
         if getattr(request, "_manual_failed", False):
@@ -108,7 +110,26 @@ class ManualAddMixin:
         return super().response_add(request, obj, post_url_continue)
 
     def has_delete_permission(self, request, obj=None):
-        return False
+        # Superusers only. Deleting a Deposit / Withdrawal here removes ONLY that row:
+        #   * no service function is called  -> no emails are sent
+        #   * wallet balances are not touched
+        #   * ledger (WalletTransaction) rows are not touched (they are linked by a text
+        #     `reference`, not a foreign key, so nothing cascades to them)
+        return bool(request.user.is_active and request.user.is_superuser)
+
+    def get_actions(self, request):
+        """Keep Django's built-in bulk delete (with its confirmation page) but label it clearly."""
+        actions = super().get_actions(request)
+        if "delete_selected" in actions:
+            func, name, _description = actions["delete_selected"]
+            actions["delete_selected"] = (
+                func, name, "DELETE selected entries (no emails, no balance changes)"
+            )
+        return actions
+
+    def delete_queryset(self, request, queryset):
+        # Plain row deletion on purpose. Never route this through services.*.
+        queryset.delete()
 
 
 # --------------------------------------------------------------------------- #
